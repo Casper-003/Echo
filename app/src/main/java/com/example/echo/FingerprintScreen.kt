@@ -56,7 +56,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import java.io.File
 import java.text.SimpleDateFormat
@@ -71,6 +74,7 @@ fun FingerprintManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
     var selectedMap by remember { mutableStateOf<MapEntity?>(null) }
     var showNewMapDialog by remember { mutableStateOf(false) }
     var showManualMapDialog by remember { mutableStateOf(false) }
+    var showGridSpacingDialog by remember { mutableStateOf(false) }
 
     // 管理模式
     var isManageMode by remember { mutableStateOf(false) }
@@ -240,8 +244,9 @@ fun FingerprintManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
 
                         // ── 弹出菜单选项 ──
                         val menuItems = listOf(
-                            Triple(Icons.Default.Straighten, "手动输入尺寸") { sharedViewModel.isFabExpanded = false; showManualMapDialog = true },
-                            Triple(Icons.Default.ViewInAr,   "AR 实景测绘")  { sharedViewModel.isFabExpanded = false; sharedViewModel.isArScanning = true }
+                            Triple(Icons.Default.GridOn,      "采集间距")    { sharedViewModel.isFabExpanded = false; showGridSpacingDialog = true },
+                            Triple(Icons.Default.Straighten,  "手动输入尺寸") { sharedViewModel.isFabExpanded = false; showManualMapDialog = true },
+                            Triple(Icons.Default.ViewInAr,    "AR 实景测绘")  { sharedViewModel.isFabExpanded = false; sharedViewModel.isArScanning = true }
                         )
                         Column(
                             horizontalAlignment = Alignment.End,
@@ -250,18 +255,29 @@ fun FingerprintManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
                                 .padding(end = 16.dp, bottom = bottomPadding + 100.dp)
                         ) {
                             menuItems.forEachIndexed { index, (icon, label, action) ->
-                                val delay = index * 60
+                                val enterDelay = (menuItems.size - 1 - index) * 60L
+                                val exitDelay = index * 40L
+                                var itemVisible by remember { mutableStateOf(false) }
+                                LaunchedEffect(sharedViewModel.isFabExpanded) {
+                                    if (sharedViewModel.isFabExpanded) {
+                                        kotlinx.coroutines.delay(enterDelay)
+                                        itemVisible = true
+                                    } else {
+                                        kotlinx.coroutines.delay(exitDelay)
+                                        itemVisible = false
+                                    }
+                                }
                                 androidx.compose.animation.AnimatedVisibility(
-                                    visible = sharedViewModel.isFabExpanded,
-                                    enter = fadeIn(tween(180, delayMillis = delay)) + slideInHorizontally(
+                                    visible = itemVisible,
+                                    enter = fadeIn(tween(140)) + slideInHorizontally(
                                         animationSpec = spring(
                                             dampingRatio = Spring.DampingRatioMediumBouncy,
-                                            stiffness = Spring.StiffnessMediumLow
+                                            stiffness = Spring.StiffnessMedium
                                         ),
                                         initialOffsetX = { it }
                                     ),
-                                    exit  = fadeOut(tween(120)) + slideOutHorizontally(
-                                        animationSpec = tween(150),
+                                    exit = fadeOut(tween(80)) + slideOutHorizontally(
+                                        animationSpec = tween(100),
                                         targetOffsetX = { it }
                                     )
                                 ) {
@@ -270,7 +286,8 @@ fun FingerprintManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
                                         shape = RoundedCornerShape(50),
                                         color = MaterialTheme.colorScheme.surfaceContainer,
                                         tonalElevation = 4.dp,
-                                        modifier = Modifier.padding(bottom = 12.dp)
+                                        modifier = Modifier
+                                            .padding(bottom = 12.dp)
                                     ) {
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
@@ -298,48 +315,51 @@ fun FingerprintManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
                         if (!isManageMode) {
                             val fabRotation by androidx.compose.animation.core.animateFloatAsState(
                                 targetValue = if (sharedViewModel.isFabExpanded) 45f else 0f,
-                                animationSpec = tween(300),
-                                label = "fabRotation"
-                            )
-                            val fabSize by animateDpAsState(
-                                targetValue = if (sharedViewModel.isFabExpanded) 56.dp else 72.dp,
                                 animationSpec = spring(
                                     dampingRatio = Spring.DampingRatioMediumBouncy,
                                     stiffness = Spring.StiffnessMedium
                                 ),
-                                label = "fabSize"
+                                label = "fabRotation"
+                            )
+                            val fabScale by androidx.compose.animation.core.animateFloatAsState(
+                                targetValue = if (sharedViewModel.isFabExpanded) 0.78f else 1f,
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                                    stiffness = Spring.StiffnessMedium
+                                ),
+                                label = "fabScale"
                             )
                             val fabCorner by animateDpAsState(
-                                targetValue = if (sharedViewModel.isFabExpanded) 28.dp else 20.dp,
+                                targetValue = if (sharedViewModel.isFabExpanded) 40.dp else 20.dp,
                                 animationSpec = spring(
                                     dampingRatio = Spring.DampingRatioMediumBouncy,
                                     stiffness = Spring.StiffnessMedium
                                 ),
                                 label = "fabCorner"
                             )
-                            Box(
+                            FloatingActionButton(
+                                onClick = { sharedViewModel.isFabExpanded = !sharedViewModel.isFabExpanded },
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary,
+                                shape = RoundedCornerShape(fabCorner),
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
                                     .padding(end = 16.dp, bottom = bottomPadding + 16.dp)
-                                    .size(72.dp)
+                                    .size(79.dp)
+                                    .graphicsLayer {
+                                        scaleX = fabScale
+                                        scaleY = fabScale
+                                        // 右上角为变换原点：收缩时向右上角退，放大时从右上角向左下扩
+                                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0f)
+                                    }
                             ) {
-                                FloatingActionButton(
-                                    onClick = { sharedViewModel.isFabExpanded = !sharedViewModel.isFabExpanded },
-                                    containerColor = MaterialTheme.colorScheme.primary,
-                                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                                    shape = RoundedCornerShape(fabCorner),
+                                Icon(
+                                    Icons.Default.Add,
+                                    contentDescription = "新建",
                                     modifier = Modifier
-                                        .size(fabSize)
-                                        .offset(x = 72.dp - fabSize, y = 72.dp - fabSize)
-                                ) {
-                                    Icon(
-                                        Icons.Default.Add,
-                                        contentDescription = "新建",
-                                        modifier = Modifier
-                                            .size(32.dp)
-                                            .rotate(fabRotation)
-                                    )
-                                }
+                                        .size(32.dp)
+                                        .rotate(fabRotation)
+                                )
                             }
                         }
                         } // end Box
@@ -354,6 +374,7 @@ fun FingerprintManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
                             onBack = { selectedMap = null },
                             onReEdit = { poly ->
                                 selectedMap = null
+                                sharedViewModel.pendingBgPath = targetMap.bgImageUri.ifEmpty { null }
                                 sharedViewModel.rawPolygonToEdit = poly
                             }
                         )
@@ -379,6 +400,40 @@ fun FingerprintManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
                         )
                         sharedViewModel.createNewMap(name = name, w = w, l = l, isAr = false, polygon = rectPolygon)
                         showManualMapDialog = false
+                    }
+                )
+            }
+            // 采集间距设置弹窗
+            if (showGridSpacingDialog) {
+                AlertDialog(
+                    onDismissRequest = { showGridSpacingDialog = false },
+                    icon = { Icon(Icons.Default.GridOn, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                    title = { Text("指纹采集间距", fontWeight = FontWeight.Bold) },
+                    text = {
+                        Column {
+                            Text(
+                                "相邻两个采集点之间的物理距离，建议 0.5 ~ 2.0m",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(16.dp))
+                            OutlinedTextField(
+                                value = sharedViewModel.gridSpacing,
+                                onValueChange = { sharedViewModel.gridSpacing = it },
+                                singleLine = true,
+                                suffix = { Text("m") },
+                                label = { Text("间距") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(onClick = { showGridSpacingDialog = false }) { Text("确认") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showGridSpacingDialog = false }) { Text("取消") }
                     }
                 )
             }
@@ -594,6 +649,20 @@ fun MapDetailScreen(
                     modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(32.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)).border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(32.dp)),
                     contentAlignment = Alignment.Center
                 ) {
+                    // 底图层
+                    if (map.bgImageUri.isNotEmpty()) {
+                        AsyncImage(
+                            model = map.bgImageUri,
+                            contentDescription = "底图",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer(alpha = 0.35f)
+                        )
+                    }
+                    // 虚线网格层
+                    GridCanvas(polygon = polygon, modifier = Modifier.fillMaxSize())
+                    // 轮廓线层
                     if (polygon.size >= 3) {
                         val primaryColor = MaterialTheme.colorScheme.primary
                         Canvas(modifier = Modifier.fillMaxSize().padding(32.dp)) {
@@ -851,13 +920,22 @@ fun NewMapSelectionDialog(onDismiss: () -> Unit, onSelectAR: () -> Unit, onSelec
 }
 
 
-// 射线法判断点是否在多边形内（用于 AR 地图格点过滤）
-fun pointInPolygon(pt: Point, polygon: List<Point>): Boolean {
+// 判断点是否在多边形内或边上（射线法 + 线段检测，修复边界点丢失问题）
+fun pointInOrOnPolygon(pt: Point, polygon: List<Point>): Boolean {
+    val eps = 1e-9
     var inside = false
     var j = polygon.size - 1
     for (i in polygon.indices) {
         val xi = polygon[i].x; val yi = polygon[i].y
         val xj = polygon[j].x; val yj = polygon[j].y
+        // 检测点是否在当前线段上
+        val minX = minOf(xi, xj); val maxX = maxOf(xi, xj)
+        val minY = minOf(yi, yj); val maxY = maxOf(yi, yj)
+        if (pt.x in minX - eps..maxX + eps && pt.y in minY - eps..maxY + eps) {
+            val cross = (xj - xi) * (pt.y - yi) - (yj - yi) * (pt.x - xi)
+            if (kotlin.math.abs(cross) < eps) return true
+        }
+        // 射线法
         if ((yi > pt.y) != (yj > pt.y) &&
             pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi) {
             inside = !inside
@@ -957,7 +1035,7 @@ fun CollectionMapScreen(sharedViewModel: SharedViewModel, onBackClick: () -> Uni
                 var y = 0f
                 while (y <= l) {
                     val pt = Point(x.toDouble(), y.toDouble())
-                    if (mapPolygon.size < 3 || pointInPolygon(pt, mapPolygon)) list.add(pt)
+                    if (mapPolygon.size < 3 || pointInOrOnPolygon(pt, mapPolygon)) list.add(pt)
                     y += s
                 }
                 x += s
@@ -1014,6 +1092,14 @@ fun CollectionMapScreen(sharedViewModel: SharedViewModel, onBackClick: () -> Uni
 
     val mapContent = @Composable {
         Box(modifier = Modifier.fillMaxSize().padding(all = 16.dp).clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)).border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), RoundedCornerShape(24.dp))) {
+            if (currentMap?.bgImageUri?.isNotEmpty() == true) {
+                AsyncImage(
+                    model = currentMap.bgImageUri,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().graphicsLayer(alpha = 0.35f)
+                )
+            }
             InteractiveRadarMap(
                 mapPolygon = mapPolygon,
                 mapWidth = w.toDouble(),

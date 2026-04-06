@@ -38,6 +38,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -239,10 +242,23 @@ fun PositioningTestScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp) {
         } else null // 完全没有路径
     }
 
-    val gridCoordinates = remember(w, l, s) {
-        val pts = mutableListOf<Point>(); var x = 0f
-        while (x <= w) { var y = 0f; while (y <= l) { pts.add(Point(x.toDouble(), y.toDouble())); y += s }; x += s }
-        pts
+    var gridCoordinates by remember(w, l, s, mapPolygon) { mutableStateOf(listOf<Point>()) }
+    LaunchedEffect(w, l, s, mapPolygon) {
+        val pts = withContext(Dispatchers.Default) {
+            val list = mutableListOf<Point>()
+            var x = 0f
+            while (x <= w) {
+                var y = 0f
+                while (y <= l) {
+                    val pt = Point(x.toDouble(), y.toDouble())
+                    if (mapPolygon.size < 3 || pointInOrOnPolygon(pt, mapPolygon)) list.add(pt)
+                    y += s
+                }
+                x += s
+            }
+            list
+        }
+        gridCoordinates = pts
     }
 
     val configuration = LocalConfiguration.current
@@ -258,6 +274,14 @@ fun PositioningTestScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp) {
                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f))
                 .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), RoundedCornerShape(24.dp))
         ) {
+            if (currentMap?.bgImageUri?.isNotEmpty() == true) {
+                AsyncImage(
+                    model = currentMap.bgImageUri,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().graphicsLayer(alpha = 0.35f)
+                )
+            }
             if (activeFingerprints.isEmpty() || sharedViewModel.selectedDevices.size < 3) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.align(Alignment.Center)) {
                     Text("雷达待命", style = MaterialTheme.typography.headlineSmall, color = Color.Gray)

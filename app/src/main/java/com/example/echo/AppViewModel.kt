@@ -16,6 +16,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.io.IOException
+import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "app_settings")
@@ -87,6 +89,7 @@ class SharedViewModel(application: Application) : AndroidViewModel(application) 
     var isBottomBarVisible by mutableStateOf(true)
     var isCollectingMode by mutableStateOf(false)
     var isFabExpanded by mutableStateOf(false)
+    var isSettingsDetailOpen by mutableStateOf(false)
     var gridSpacing by mutableStateOf("2")
 
     // AR 扫描全局状态（提升到顶层，使 ArScannerScreen 能脱离 Pager padding 真正全屏）
@@ -94,6 +97,8 @@ class SharedViewModel(application: Application) : AndroidViewModel(application) 
     var rawPolygonToEdit by mutableStateOf<List<Point>?>(null)
     var pendingGridPoints by mutableStateOf<List<Point>>(emptyList())
     var pendingScanResult by mutableStateOf<ScanResult?>(null)
+    // 从详情页"重新精修轮廓"进入时，携带该地图已有的底图路径，传给精修页作为初始值
+    var pendingBgPath by mutableStateOf<String?>(null)
 
     init {
         // 1. 初始化 DataStore 偏好设置
@@ -176,6 +181,35 @@ class SharedViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch(Dispatchers.IO) {
             mapList.find { it.mapId == mapId }?.let {
                 mapDao.insertMap(it.copy(mapName = newName))
+            }
+        }
+    }
+
+    /**
+     * 将底图文件从外部 URI 复制到 App 私有目录，更新 DB。
+     * 存储路径：filesDir/maps/{mapId}/bg.jpg
+     * 用于：相册选图入口 / BEV 扫描生成图入口（两者输出格式相同，只替换此方法调用侧）
+     */
+    fun updateMapBgImage(mapId: String, sourceUri: android.net.Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val destDir = File(getApplication<Application>().filesDir, "maps/$mapId").also { it.mkdirs() }
+                val destFile = File(destDir, "bg.jpg")
+                getApplication<Application>().contentResolver.openInputStream(sourceUri)?.use { input ->
+                    FileOutputStream(destFile).use { output -> input.copyTo(output) }
+                }
+                mapList.find { it.mapId == mapId }?.let {
+                    mapDao.insertMap(it.copy(bgImageUri = destFile.absolutePath))
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    /** 更新底图相对地图原点的偏移量（米），由精修界面双指拖动底图时触发 */
+    fun updateMapBgOffset(mapId: String, offsetX: Double, offsetY: Double) {
+        viewModelScope.launch(Dispatchers.IO) {
+            mapList.find { it.mapId == mapId }?.let {
+                mapDao.insertMap(it.copy(bgOffsetX = offsetX, bgOffsetY = offsetY))
             }
         }
     }

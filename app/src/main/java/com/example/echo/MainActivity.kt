@@ -26,7 +26,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
@@ -44,6 +43,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import com.example.echo.ui.theme.MaterialColorSchemeGenerator
 
 @SuppressLint("InlinedApi")
 class MainActivity : ComponentActivity() {
@@ -78,59 +78,10 @@ fun MainAppRouter() {
     val colorScheme = if (isDynamic) {
         if (isDarkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     } else {
-        // 当 DYNAMIC 在 Android < 12 时回退到 Miku Green，避免出现 Material3 默认紫色
+        // 当 DYNAMIC 在 Android < 12 时回退到 Miku Green
         val seed = if (preset == ThemePreset.DYNAMIC) ThemePreset.MIKU.color else preset.color
-        if (isDarkTheme) {
-            val bg = Color(0xFF121212)
-            val surf = Color(0xFF1E1E1E)
-            darkColorScheme(
-                primary = seed,
-                onPrimary = Color.Black,
-                primaryContainer = seed.copy(alpha = 0.3f).compositeOver(bg),
-                onPrimaryContainer = seed.copy(alpha = 0.9f),
-                secondary = seed,
-                onSecondary = Color.Black,
-                secondaryContainer = seed.copy(alpha = 0.25f).compositeOver(bg),
-                onSecondaryContainer = seed.copy(alpha = 0.9f),
-                tertiary = seed,
-                onTertiary = Color.Black,
-                tertiaryContainer = seed.copy(alpha = 0.25f).compositeOver(bg),
-                onTertiaryContainer = seed.copy(alpha = 0.9f),
-                background = bg,
-                onBackground = Color.White.copy(alpha = 0.87f),
-                surface = bg,
-                onSurface = Color.White.copy(alpha = 0.87f),
-                surfaceVariant = seed.copy(alpha = 0.1f).compositeOver(surf),
-                surfaceContainer = Color(0xFF1E1E1E),
-                onSurfaceVariant = Color.White.copy(alpha = 0.8f),
-                outline = Color.White.copy(alpha = 0.2f),
-                outlineVariant = Color.White.copy(alpha = 0.12f)
-            )
-        } else {
-            val bg = Color(0xFFFAFAFA)
-            lightColorScheme(
-                primary = seed,
-                onPrimary = Color.White,
-                primaryContainer = seed.copy(alpha = 0.15f).compositeOver(bg),
-                onPrimaryContainer = seed,
-                secondary = seed,
-                onSecondary = Color.White,
-                secondaryContainer = seed.copy(alpha = 0.12f).compositeOver(bg),
-                onSecondaryContainer = seed,
-                tertiary = seed,
-                onTertiary = Color.White,
-                tertiaryContainer = seed.copy(alpha = 0.12f).compositeOver(bg),
-                onTertiaryContainer = seed,
-                background = bg,
-                onBackground = Color.Black.copy(alpha = 0.87f),
-                surface = bg,
-                onSurface = Color.Black.copy(alpha = 0.87f),
-                surfaceVariant = seed.copy(alpha = 0.08f).compositeOver(Color(0xFFF5F5F5)),
-                onSurfaceVariant = Color.Black.copy(alpha = 0.8f),
-                outline = Color.Black.copy(alpha = 0.2f),
-                outlineVariant = Color.Black.copy(alpha = 0.12f)
-            )
-        }
+        if (isDarkTheme) MaterialColorSchemeGenerator.darkScheme(seed)
+        else             MaterialColorSchemeGenerator.lightScheme(seed)
     }
 
     // 根据当前主题动态更新状态栏图标颜色：深色模式用白色图标，浅色模式用深色图标
@@ -152,8 +103,9 @@ fun MainAppScreen(sharedViewModel: SharedViewModel) {
     val coroutineScope = rememberCoroutineScope()
 
     // 非首页时，返回键跳回地图页（index=1）；地图页时正常退出
+    // 设置页子项展开时不拦截，让 SettingsScreen 内部的 BackHandler 优先处理
     val currentPage = pagerState.currentPage
-    if (currentPage != 1) {
+    if (currentPage != 1 && !sharedViewModel.isSettingsDetailOpen) {
         BackHandler {
             coroutineScope.launch { pagerState.animateScrollToPage(1) }
         }
@@ -207,14 +159,20 @@ fun MainAppScreen(sharedViewModel: SharedViewModel) {
 
         // 精修页：同样全屏悬浮，脱离 Pager padding
         if (!sharedViewModel.isArScanning && sharedViewModel.rawPolygonToEdit != null) {
-            BackHandler { sharedViewModel.rawPolygonToEdit = null }
+            val clearEdit = {
+                sharedViewModel.rawPolygonToEdit = null
+                sharedViewModel.pendingGridPoints = emptyList()
+                sharedViewModel.pendingBgPath = null
+            }
+            BackHandler { clearEdit() }
             MapVerificationScreen(
-                rawPolygon  = sharedViewModel.rawPolygonToEdit!!,
+                rawPolygon   = sharedViewModel.rawPolygonToEdit!!,
                 rawObstacles = emptyList(),
                 sharedViewModel = sharedViewModel,
-                onSaveSuccess = { sharedViewModel.rawPolygonToEdit = null; sharedViewModel.pendingGridPoints = emptyList() },
-                onDiscard     = { sharedViewModel.rawPolygonToEdit = null; sharedViewModel.pendingGridPoints = emptyList() },
-                onRescan      = { sharedViewModel.rawPolygonToEdit = null; sharedViewModel.pendingGridPoints = emptyList(); sharedViewModel.isArScanning = true }
+                existingBgPath  = sharedViewModel.pendingBgPath,
+                onSaveSuccess = { clearEdit() },
+                onDiscard     = { clearEdit() },
+                onRescan      = { clearEdit(); sharedViewModel.isArScanning = true }
             )
         }
 

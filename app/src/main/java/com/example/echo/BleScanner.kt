@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -93,7 +94,11 @@ class BleScanner(private val context: Context) {
     fun startScan() {
         scannedDevicesMap.clear()
         _scannedDevicesFlow.value = emptyList() // 🌟 启动时先清空残留 UI
-        scanner?.startScan(scanCallback)
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setReportDelay(0)
+            .build()
+        scanner?.startScan(null, settings, scanCallback)
     }
 
     fun stopScan() {

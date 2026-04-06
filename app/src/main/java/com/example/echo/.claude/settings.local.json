@@ -22,7 +22,13 @@
       "WebFetch(domain:developers.google.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(/c/Users/or000/AppData/Local/Android/Sdk/platform-tools/adb.exe logcat:*)",
-      "WebFetch(domain:androidx.dev)"
+      "WebFetch(domain:androidx.dev)",
+      "WebFetch(domain:m3.material.io)",
+      "Bash(xargs grep:*)",
+      "Bash(xargs -I{} bash -c \"jar tf \"\"{}\"\" 2>/dev/null | grep -l \"\"Hct\\\\|TonalPalette\\\\|SchemeTonal\"\" && echo \"\"{}\"\"\")",
+      "Bash(xargs -I{} bash -c \"jar tf \"\"{}\"\" 2>/dev/null | grep -q \"\"Hct\"\" && echo \"\"{}\"\"\")",
+      "WebFetch(domain:wiki.icbbuy.com)",
+      "WebFetch(domain:www.espressif.com)"
     ]
   }
 }

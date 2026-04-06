@@ -1,7 +1,8 @@
 package com.example.echo
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -9,6 +10,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -21,6 +23,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.Bluetooth
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults.Indicator
@@ -60,13 +64,16 @@ fun BaseStationManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
     val isWideScreen = configuration.screenWidthDp > 600
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
-    // 按钮形状动画：扫描中→小圆角矩形，停止时→大圆角胶囊
-    val buttonCornerRadius by animateDpAsState(
-        targetValue = if (isScanning) 16.dp else 50.dp,
+    // 颜色平滑过渡
+    val buttonColor by animateColorAsState(
+        targetValue = if (isScanning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
         animationSpec = tween(durationMillis = 400),
-        label = "buttonCorner"
+        label = "buttonColor"
     )
-    val buttonShape = RoundedCornerShape(buttonCornerRadius)
+    val onScanClick = {
+        if (isScanning) scanner.stopScan() else scanner.startScan()
+        isScanning = !isScanning
+    }
 
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection), containerColor = Color.Transparent,
@@ -92,16 +99,35 @@ fun BaseStationManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
                         contentAlignment = Alignment.Center
                     ) {
                         Button(
-                            onClick = { if (isScanning) scanner.stopScan() else scanner.startScan(); isScanning = !isScanning },
-                            modifier = Modifier.fillMaxWidth().height(100.dp),
-                            shape = buttonShape,
-                            colors = ButtonDefaults.buttonColors(containerColor = if (isScanning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                            onClick = onScanClick,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(100.dp),
+                            shape = RoundedCornerShape(50.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = buttonColor)
                         ) {
-                            Text(
-                                text = if (isScanning) "停止扫描" else "开始扫描",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
+                            AnimatedContent(
+                                targetState = isScanning,
+                                transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(150)) },
+                                label = "buttonContent"
+                            ) { scanning ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(
+                                        imageVector = if (scanning) Icons.Rounded.Stop else Icons.Rounded.Bluetooth,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = if (scanning) "停止扫描" else "开始扫描",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                         }
                     }
                     val wideListState = rememberLazyListState()
@@ -154,16 +180,35 @@ fun BaseStationManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
                     contentAlignment = Alignment.Center
                 ) {
                     Button(
-                        onClick = { if (isScanning) scanner.stopScan() else scanner.startScan(); isScanning = !isScanning },
-                        modifier = Modifier.height(80.dp).fillMaxWidth(),
-                        shape = buttonShape,
-                        colors = ButtonDefaults.buttonColors(containerColor = if (isScanning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                        onClick = onScanClick,
+                        modifier = Modifier
+                            .height(80.dp)
+                            .fillMaxWidth(),
+                        shape = RoundedCornerShape(50.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = buttonColor)
                     ) {
-                        Text(
-                            text = if (isScanning) "停止扫描" else "开始扫描",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
+                        AnimatedContent(
+                            targetState = isScanning,
+                            transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(150)) },
+                            label = "buttonContent"
+                        ) { scanning ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (scanning) Icons.Rounded.Stop else Icons.Rounded.Bluetooth,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = if (scanning) "停止扫描" else "开始扫描",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
                 Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp).clip(RoundedCornerShape(16.dp))) {

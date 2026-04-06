@@ -8,10 +8,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -43,7 +44,9 @@ fun MapVerificationScreen(
     sharedViewModel: SharedViewModel,
     onSaveSuccess: () -> Unit,
     onDiscard: () -> Unit,
-    onRescan: () -> Unit = onDiscard  // 重新扫描：丢弃当前结果并返回 AR 界面
+    onRescan: () -> Unit = onDiscard,
+    // 从详情页入口传入已有底图路径（新建时为 null）
+    existingBgPath: String? = null
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -51,31 +54,26 @@ fun MapVerificationScreen(
     var editedPolygon by remember { mutableStateOf(rawPolygon) }
     var showObstacles by remember { mutableStateOf(rawObstacles.isNotEmpty()) }
 
-    // 旋转滑块状态（±180°，松开时烘焙进多边形坐标）
-    var rotationDeg by remember { mutableFloatStateOf(0f) }
-    val snapAngles = remember { listOf(-180f, -135f, -90f, -45f, 0f, 45f, 90f, 135f, 180f) }
-    fun snapRotation(raw: Float): Float {
-        val nearest = snapAngles.minByOrNull { abs(it - raw) } ?: raw
-        return if (abs(nearest - raw) <= 4f) nearest else raw
-    }
-
-    // 90° 旋转动画：Animatable 精确控制，动画结束后 snap 归零再烘焙，避免视觉反跳
+    // 90° 旋转动画
     val snap90Anim = remember { Animatable(0f) }
     fun triggerSnap90() {
         coroutineScope.launch {
             snap90Anim.animateTo(90f, tween(300))
             editedPolygon = rotatePolygon90(editedPolygon)
-            snap90Anim.snapTo(0f)   // 瞬间归零，坐标已烘焙，视觉无跳变
+            snap90Anim.snapTo(0f)
         }
     }
 
-    var bgImageUri by remember { mutableStateOf<Uri?>(null) }
+    // 底图状态
+    var bgImageUri by remember { mutableStateOf<Uri?>(existingBgPath?.let { Uri.parse(it) }) }
     var bgScale by remember { mutableFloatStateOf(1f) }
     var bgOffset by remember { mutableStateOf(Offset.Zero) }
-    var bgRotation by remember { mutableFloatStateOf(0f) }
+    // 底图透明度（0.1 ~ 0.7，默认 0.35）
+    var bgAlpha by remember { mutableFloatStateOf(0.35f) }
 
+    // 相册选图入口
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) bgImageUri = uri
+        if (uri != null) { bgImageUri = uri; bgScale = 1f; bgOffset = Offset.Zero }
     }
 
     Scaffold(
@@ -99,6 +97,19 @@ fun MapVerificationScreen(
                             val finalWidth = maxX - minX
                             val finalLength = maxY - minY
 
+                            // 将底图从外部 URI 复制到 App 私有目录（若用户选了图）
+                            val savedBgUri = bgImageUri?.let { uri ->
+                                try {
+                                    val tmpId = "tmp_${System.currentTimeMillis()}"
+                                    val destDir = java.io.File(context.filesDir, "maps/$tmpId").also { it.mkdirs() }
+                                    val destFile = java.io.File(destDir, "bg.jpg")
+                                    context.contentResolver.openInputStream(uri)?.use { input ->
+                                        java.io.FileOutputStream(destFile).use { output -> input.copyTo(output) }
+                                    }
+                                    destFile.absolutePath
+                                } catch (_: Exception) { null }
+                            } ?: ""
+
                             val prefix = "AR 扫描图_"
                             val nextIndex = sharedViewModel.mapList
                                 .mapNotNull { it.mapName.removePrefix(prefix).toIntOrNull() }
@@ -109,17 +120,11 @@ fun MapVerificationScreen(
                                 l = finalLength,
                                 isAr = true,
                                 polygon = normalizedPolygon,
-                                bgImageUri = bgImageUri?.toString() ?: ""
+                                bgImageUri = savedBgUri
                             )
-                            // 障碍物坐标与多边形同步归一化，写入 DB
                             if (rawObstacles.isNotEmpty()) {
-                                val normalizedObstacles = rawObstacles.map {
-                                    Point(it.x - minX, it.y - minY)
-                                }
-                                // createNewMap 内部 switchActiveMap 是异步的，
-                                // 通过 currentActiveMapId 状态流感知新 mapId
+                                val normalizedObstacles = rawObstacles.map { Point(it.x - minX, it.y - minY) }
                                 coroutineScope.launch {
-                                    // 等待 currentActiveMapId 变化（最多等 2s）
                                     var waited = 0
                                     while (sharedViewModel.currentActiveMapId.value == null && waited < 2000) {
                                         kotlinx.coroutines.delay(50); waited += 50
@@ -146,7 +151,7 @@ fun MapVerificationScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // 预览框：固定占满剩余空间，地图在内部按比例 fit 缩放
+            // 预览框
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -156,6 +161,7 @@ fun MapVerificationScreen(
                     .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
                     .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), RoundedCornerShape(24.dp))
             ) {
+                // 底图层：双指平移+缩放调整位置，不可旋转
                 if (bgImageUri != null) {
                     AsyncImage(
                         model = bgImageUri,
@@ -168,112 +174,99 @@ fun MapVerificationScreen(
                                 scaleY = bgScale,
                                 translationX = bgOffset.x,
                                 translationY = bgOffset.y,
-                                rotationZ = bgRotation
+                                alpha = bgAlpha
                             )
                             .pointerInput(Unit) {
-                                detectTransformGestures { _, pan, zoom, rotation ->
-                                    bgScale = (bgScale * zoom).coerceIn(0.1f, 10f)
-                                    bgOffset += pan
-                                    bgRotation += rotation
+                                // 只在双指时响应，单指不拦截（避免与外层视图冲突）
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        if (event.changes.size >= 2) {
+                                            val zoom = event.calculateZoom()
+                                            val pan  = event.calculatePan()
+                                            bgScale = (bgScale * zoom).coerceIn(0.1f, 10f)
+                                            bgOffset += pan
+                                            event.changes.forEach { it.consume() }
+                                        }
+                                    } while (event.changes.any { it.pressed })
                                 }
                             }
                     )
                 } else {
                     Text(
-                        "双指缩放平移可调整底图\n拖拽蓝点可微调墙角",
+                        "请在下方导入底图\n双指可缩放平移调整位置",
                         color = Color.Gray.copy(alpha = 0.5f),
                         modifier = Modifier.align(Alignment.Center)
                     )
                 }
 
-                // 网格层：固定不随旋转转动
-                GridCanvas(
-                    polygon = editedPolygon,
-                    modifier = Modifier.fillMaxSize()
-                )
+                GridCanvas(polygon = editedPolygon, modifier = Modifier.fillMaxSize())
 
-                // 多边形编辑层：随滑块和90°动画旋转
                 PolygonEditorCanvas(
                     polygon = editedPolygon,
                     onPolygonChanged = { editedPolygon = it },
                     modifier = Modifier
                         .fillMaxSize()
-                        .graphicsLayer { rotationZ = rotationDeg + snap90Anim.value }
+                        .graphicsLayer { rotationZ = snap90Anim.value }
                 )
 
-                // 障碍物叠层：橙色方格，与多边形同步旋转
                 if (showObstacles && rawObstacles.isNotEmpty() && editedPolygon.size >= 2) {
                     val obstacleColor = Color(0xFFFF7043).copy(alpha = 0.7f)
                     Canvas(
                         modifier = Modifier
                             .fillMaxSize()
-                            .graphicsLayer { rotationZ = rotationDeg + snap90Anim.value }
+                            .graphicsLayer { rotationZ = snap90Anim.value }
                     ) {
-                        val minX = editedPolygon.minOf { it.x }
-                        val maxX = editedPolygon.maxOf { it.x }
-                        val minY = editedPolygon.minOf { it.y }
-                        val maxY = editedPolygon.maxOf { it.y }
-                        val rangeX = (maxX - minX).coerceAtLeast(0.01)
-                        val rangeY = (maxY - minY).coerceAtLeast(0.01)
+                        val minX = editedPolygon.minOf { it.x }; val maxX = editedPolygon.maxOf { it.x }
+                        val minY = editedPolygon.minOf { it.y }; val maxY = editedPolygon.maxOf { it.y }
+                        val rangeX = (maxX - minX).coerceAtLeast(0.01); val rangeY = (maxY - minY).coerceAtLeast(0.01)
                         val scale = minOf(size.width / rangeX.toFloat(), size.height / rangeY.toFloat()) * 0.8f
                         val offX = size.width / 2f - ((minX + maxX) / 2f * scale).toFloat()
                         val offY = size.height / 2f - ((minY + maxY) / 2f * scale).toFloat()
                         val cellPx = 0.15f * scale
                         rawObstacles.forEach { obs ->
-                            val cx = offX + obs.x.toFloat() * scale
-                            val cy = offY + obs.y.toFloat() * scale
-                            drawRect(
-                                color = obstacleColor,
-                                topLeft = Offset(cx - cellPx / 2, cy - cellPx / 2),
-                                size = androidx.compose.ui.geometry.Size(cellPx, cellPx)
-                            )
+                            val cx = offX + obs.x.toFloat() * scale; val cy = offY + obs.y.toFloat() * scale
+                            drawRect(color = obstacleColor, topLeft = Offset(cx - cellPx / 2, cy - cellPx / 2), size = androidx.compose.ui.geometry.Size(cellPx, cellPx))
                         }
                     }
                 }
             }
 
-            // 旋转微调滑块
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 4.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            // 底图透明度调节（仅当有底图时显示）
+            if (bgImageUri != null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 2.dp)
                 ) {
-                    Text(
-                        "旋转微调",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        "${rotationDeg.toInt()}°",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = if (rotationDeg == 0f) MaterialTheme.colorScheme.onSurfaceVariant
-                                else MaterialTheme.colorScheme.primary
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "底图透明度",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "${(bgAlpha * 100).toInt()}%",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Slider(
+                        value = bgAlpha,
+                        onValueChange = { bgAlpha = it },
+                        valueRange = 0.1f..0.7f,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
-                Slider(
-                    value = rotationDeg,
-                    onValueChange = { raw ->
-                        rotationDeg = snapRotation(raw)
-                    },
-                    onValueChangeFinished = {
-                        // 松开时把旋转烘焙进坐标，滑块归零
-                        if (rotationDeg != 0f) {
-                            editedPolygon = rotatePolygonByDeg(editedPolygon, rotationDeg)
-                            rotationDeg = 0f
-                        }
-                    },
-                    valueRange = -180f..180f,
-                    steps = 0,
-                    modifier = Modifier.fillMaxWidth()
-                )
             }
 
+            // 工具栏
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -288,6 +281,7 @@ fun MapVerificationScreen(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // 旋转 90°
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         FilledIconButton(
                             onClick = { triggerSnap90() },
@@ -299,24 +293,44 @@ fun MapVerificationScreen(
                         Text("旋转90°", style = MaterialTheme.typography.labelSmall)
                     }
 
+                    // 相册选图入口
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         FilledIconButton(
                             onClick = { imagePicker.launch("image/*") },
                             colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
                         ) {
-                            Icon(Icons.Default.Image, contentDescription = "导入户型底图", tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                            Icon(Icons.Default.Image, contentDescription = "从相册导入底图", tint = MaterialTheme.colorScheme.onPrimaryContainer)
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text("导入底图", style = MaterialTheme.typography.labelSmall)
                     }
 
+                    // BEV 扫描生成底图入口（待实现）
+                    // TODO: BEV_SCAN 入口
+                    // 短期目标：语义分割 + IPM 方案
+                    //   1. 引导用户缓慢平移拍摄地面多帧
+                    //   2. MobileNetV3-Small（TFLite，~8MB）逐帧分割地板区域
+                    //   3. 根据陀螺仪姿态矩阵做逆透视变换（IPM）展平每帧
+                    //   4. ORB 特征点匹配拼接多帧，覆盖 map.width × map.length 范围
+                    //   5. 输出 JPG 回调至此处 bgImageUri（与相册选图完全一致的接入点）
+                    // 长期目标：端到端 BEV（RoomFormer ONNX 量化版，目标 <50MB）
+                    //   参考：github.com/ywyue/RoomFormer
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         FilledIconButton(
-                            onClick = {
-                                bgScale = 1f
-                                bgOffset = Offset.Zero
-                                bgRotation = 0f
-                            },
+                            onClick = { /* TODO: 启动 BEV 扫描 Activity */ },
+                            enabled = false, // 待实现
+                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            Icon(Icons.Default.AutoAwesome, contentDescription = "AI 扫描生成底图", tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("AI 扫描", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                    }
+
+                    // 复位底图
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        FilledIconButton(
+                            onClick = { bgScale = 1f; bgOffset = Offset.Zero },
                             colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                         ) {
                             Icon(Icons.Default.FilterCenterFocus, contentDescription = "复位底图")
@@ -325,19 +339,7 @@ fun MapVerificationScreen(
                         Text("复位底图", style = MaterialTheme.typography.labelSmall)
                     }
 
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        FilledIconButton(
-                            onClick = {
-                                editedPolygon = orthogonalizePolygon(editedPolygon)
-                            },
-                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        ) {
-                            Icon(Icons.Default.AutoFixHigh, contentDescription = "AI 规整", tint = MaterialTheme.colorScheme.onPrimary)
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("一键直角化", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    }
-
+                    // 重新扫描
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         FilledIconButton(
                             onClick = onRescan,
@@ -349,29 +351,21 @@ fun MapVerificationScreen(
                         Text("重新扫描", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                     }
 
+                    // 障碍物显隐（仅扫描时有障碍物数据才显示）
                     if (rawObstacles.isNotEmpty()) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             FilledIconButton(
                                 onClick = { showObstacles = !showObstacles },
                                 colors = IconButtonDefaults.filledIconButtonColors(
-                                    containerColor = if (showObstacles) Color(0xFFFF7043)
-                                                     else MaterialTheme.colorScheme.surfaceVariant
+                                    containerColor = if (showObstacles) Color(0xFFFF7043) else MaterialTheme.colorScheme.surfaceVariant
                                 )
                             ) {
-                                Icon(
-                                    Icons.Default.Warning,
-                                    contentDescription = "显示/隐藏障碍物",
-                                    tint = if (showObstacles) Color.White
-                                           else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                Icon(Icons.Default.Warning, contentDescription = "显示/隐藏障碍物",
+                                    tint = if (showObstacles) Color.White else MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                "障碍(${rawObstacles.size})",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (showObstacles) Color(0xFFFF7043)
-                                        else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Text("障碍(${rawObstacles.size})", style = MaterialTheme.typography.labelSmall,
+                                color = if (showObstacles) Color(0xFFFF7043) else MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
@@ -430,7 +424,7 @@ fun GridCanvas(polygon: List<Point>, modifier: Modifier) {
 }
 
 // =================================================================================
-// 组件：交互式多边形编辑器（无网格，网格由外层 GridCanvas 负责）
+// 组件：多边形轮廓绘制（只读，不含拖拽交互；默认矩形地图不需要角点微调）
 // =================================================================================
 @Composable
 fun PolygonEditorCanvas(
@@ -440,61 +434,15 @@ fun PolygonEditorCanvas(
 ) {
     if (polygon.isEmpty()) return
 
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offsetX by remember { mutableFloatStateOf(0f) }
-    var offsetY by remember { mutableFloatStateOf(0f) }
-
-    val currentPolygon by rememberUpdatedState(polygon)
-
-    // 网格吸附：将物理坐标吸附到最近的 0.5m 网格点（距离 ≤ 0.15m 时触发）
-    val gridSpacing = 0.5
-    val snapThreshold = 0.15
-    fun snapToGrid(x: Double, y: Double): Point {
-        val snappedX = Math.round(x / gridSpacing) * gridSpacing
-        val snappedY = Math.round(y / gridSpacing) * gridSpacing
-        val dx = snappedX - x; val dy = snappedY - y
-        return if (sqrt(dx * dx + dy * dy) <= snapThreshold) Point(snappedX, snappedY)
-        else Point(x, y)
-    }
-
-    Canvas(
-        modifier = modifier.pointerInput(Unit) {
-            var activeDragIndex: Int? = null
-            detectDragGestures(
-                onDragStart = { startOffset ->
-                    val hitRadiusSq = 60f * 60f
-                    var minDstSq = Float.MAX_VALUE; var closestIdx = -1
-                    for (i in currentPolygon.indices) {
-                        val px = offsetX + (currentPolygon[i].x.toFloat() * scale)
-                        val py = offsetY + (currentPolygon[i].y.toFloat() * scale)
-                        val dstSq = (startOffset.x - px).let { it * it } + (startOffset.y - py).let { it * it }
-                        if (dstSq < hitRadiusSq && dstSq < minDstSq) { minDstSq = dstSq; closestIdx = i }
-                    }
-                    if (closestIdx != -1) activeDragIndex = closestIdx
-                },
-                onDrag = { change, dragAmount ->
-                    change.consume()
-                    activeDragIndex?.let { idx ->
-                        val newPolygon = currentPolygon.toMutableList()
-                        val rawX = newPolygon[idx].x + dragAmount.x / scale
-                        val rawY = newPolygon[idx].y + dragAmount.y / scale
-                        newPolygon[idx] = snapToGrid(rawX, rawY)
-                        onPolygonChanged(newPolygon)
-                    }
-                },
-                onDragEnd = { activeDragIndex = null },
-                onDragCancel = { activeDragIndex = null }
-            )
-        }
-    ) {
+    Canvas(modifier = modifier) {
         val minX = polygon.minOf { it.x }; val maxX = polygon.maxOf { it.x }
         val minY = polygon.minOf { it.y }; val maxY = polygon.maxOf { it.y }
         val rangeX = (maxX - minX).coerceAtLeast(1.0)
         val rangeY = (maxY - minY).coerceAtLeast(1.0)
 
-        scale = minOf(size.width / rangeX.toFloat(), size.height / rangeY.toFloat()) * 0.8f
-        offsetX = size.width / 2f - ((minX + maxX).toFloat() / 2f * scale)
-        offsetY = size.height / 2f - ((minY + maxY).toFloat() / 2f * scale)
+        val scale = minOf(size.width / rangeX.toFloat(), size.height / rangeY.toFloat()) * 0.8f
+        val offsetX = size.width / 2f - ((minX + maxX).toFloat() / 2f * scale)
+        val offsetY = size.height / 2f - ((minY + maxY).toFloat() / 2f * scale)
 
         fun toPx(p: Point) = Offset(offsetX + p.x.toFloat() * scale, offsetY + p.y.toFloat() * scale)
 
@@ -505,11 +453,6 @@ fun PolygonEditorCanvas(
         }
         drawPath(path, Color(0xFF1976D2).copy(alpha = 0.15f))
         drawPath(path, Color(0xFF1976D2).copy(alpha = 0.8f), style = Stroke(width = 4.dp.toPx()))
-
-        polygon.forEach { pt ->
-            drawCircle(Color.White, 8.dp.toPx(), toPx(pt))
-            drawCircle(Color(0xFF1976D2), 6.dp.toPx(), toPx(pt))
-        }
     }
 }
 

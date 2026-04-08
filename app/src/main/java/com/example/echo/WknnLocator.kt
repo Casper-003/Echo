@@ -47,7 +47,8 @@ class WknnLocator {
         k: Int,
         useWknn: Boolean = true,
         useAwknn: Boolean = false, // AWKNN 模式开关
-        rho: Double = 1.5          // 扩展惩罚因子
+        rho: Double = 1.5,         // 扩展惩罚因子，经验范围 1.2~2.0
+        tMin: Double = 1.5         // 阈值底噪，防止强 LOS 下邻域退化为单点，经验范围 1.0~3.0
     ): LocateResult? {
         if (liveRssi.isEmpty() || database.isEmpty()) return null
 
@@ -60,9 +61,10 @@ class WknnLocator {
         val sortedCandidates = distances.sortedBy { it.second }
 
         // 🌟 AWKNN 核心：动态计算截断 K 值
+        // threshold = max(rho * d1, tMin)：tMin 防止强 LOS 下 d1→0 导致邻域退化为单点
         val finalK = if (useAwknn && sortedCandidates.isNotEmpty()) {
             val d1 = sortedCandidates.first().second
-            val threshold = d1 * rho
+            val threshold = maxOf(d1 * rho, tMin)
             val dynamicK = sortedCandidates.count { it.second <= threshold }
             dynamicK.coerceIn(1, minOf(5, sortedCandidates.size))
         } else {

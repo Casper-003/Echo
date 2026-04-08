@@ -13,3 +13,13 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Claude Code / session files
+.claude/
+
+# Personal notes and scratch files shared during sessions
+todo.txt
+修改.txt
+
+# Reference images shared during sessions
+pics/

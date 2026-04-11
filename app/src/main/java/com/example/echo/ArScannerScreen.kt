@@ -70,27 +70,18 @@ data class ScanResult(
 
 private enum class MeasurePhase { MEASURE_LENGTH, MEASURE_WIDTH, DONE }
 
-/** 从 p0→p1 长边 + 宽度 w 构建矩形4角点（归一化到原点） */
+/** 从 p0→p1 长边 + 宽度 w 构建轴对齐矩形4角点（原点起始，横平竖直） */
 private fun buildRectangle(p0: Point, p1: Point, w: Double): ScanResult {
     val dx = p1.x - p0.x; val dy = p1.y - p0.y
     val len = sqrt(dx * dx + dy * dy).coerceAtLeast(0.01)
-    // 单位长边方向 + 单位宽边方向（左手垂直）
-    val ux = dx / len; val uy = dy / len
-    val vx = -uy;     val vy = ux
-    // 4角：p0, p1, p1+w*v, p0+w*v
-    val corners = listOf(
-        Point(p0.x,              p0.y),
-        Point(p1.x,              p1.y),
-        Point(p1.x + vx * w,    p1.y + vy * w),
-        Point(p0.x + vx * w,    p0.y + vy * w)
+    // 轴对齐：长边沿 Y 轴，宽边沿 X 轴，从原点出发
+    val boundary = listOf(
+        Point(0.0,  0.0),
+        Point(w,    0.0),
+        Point(w,    len),
+        Point(0.0,  len)
     )
-    val minX = corners.minOf { it.x }; val minY = corners.minOf { it.y }
-    val normalized = corners.map { Point(it.x - minX, it.y - minY) }
-    return ScanResult(
-        boundary = normalized,
-        widthM   = w,
-        heightM  = len
-    )
+    return ScanResult(boundary = boundary, widthM = w, heightM = len)
 }
 
 @Composable

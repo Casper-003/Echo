@@ -114,8 +114,7 @@ fun MainAppScreen(sharedViewModel: SharedViewModel) {
     // pendingScanResult 在顶层处理，避免 FingerprintManagerScreen 内部状态与顶层不同步
     LaunchedEffect(sharedViewModel.pendingScanResult) {
         val result = sharedViewModel.pendingScanResult ?: return@LaunchedEffect
-        sharedViewModel.rawPolygonToEdit = result.boundary
-        sharedViewModel.pendingGridPoints = result.gridPoints
+        sharedViewModel.rawPolygonToEdit = result
         sharedViewModel.pendingScanResult = null
         sharedViewModel.isArScanning = false
     }
@@ -161,18 +160,16 @@ fun MainAppScreen(sharedViewModel: SharedViewModel) {
         if (!sharedViewModel.isArScanning && sharedViewModel.rawPolygonToEdit != null) {
             val clearEdit = {
                 sharedViewModel.rawPolygonToEdit = null
-                sharedViewModel.pendingGridPoints = emptyList()
                 sharedViewModel.pendingBgPath = null
             }
             BackHandler { clearEdit() }
             MapVerificationScreen(
-                rawPolygon   = sharedViewModel.rawPolygonToEdit!!,
-                rawObstacles = emptyList(),
+                scanResult      = sharedViewModel.rawPolygonToEdit!!,
                 sharedViewModel = sharedViewModel,
                 existingBgPath  = sharedViewModel.pendingBgPath,
-                onSaveSuccess = { clearEdit() },
-                onDiscard     = { clearEdit() },
-                onRescan      = { clearEdit(); sharedViewModel.isArScanning = true }
+                onSaveSuccess   = { clearEdit() },
+                onDiscard       = { clearEdit() },
+                onRescan        = { clearEdit(); sharedViewModel.isArScanning = true }
             )
         }
 

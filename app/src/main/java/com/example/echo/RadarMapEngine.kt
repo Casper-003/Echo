@@ -134,7 +134,14 @@ fun InteractiveRadarMap(
         return Point(tapX.toDouble(), tapY.toDouble())
     }
 
-    fun isValidPoint(pt: Point): Boolean { return pt.x >= -0.1 && pt.x <= maxX + 0.1 && pt.y >= -0.1 && pt.y <= maxY + 0.1 }
+    fun isValidPoint(pt: Point, sizePx: IntSize): Boolean {
+        val scale = min(
+            (sizePx.width - paddingPx * 2) / maxX,
+            (sizePx.height - paddingPx * 2) / maxY
+        )
+        val tol = (paddingPx / scale).coerceAtLeast(0.5)
+        return pt.x >= -tol && pt.x <= maxX + tol && pt.y >= -tol && pt.y <= maxY + tol
+    }
 
     Canvas(
         modifier = modifier
@@ -142,7 +149,7 @@ fun InteractiveRadarMap(
             .pointerInput(gridCoordinates, editMode) {
                 detectTapGestures { offset ->
                     val pt = mapScreenToWorld(offset, size)
-                    if (isValidPoint(pt)) {
+                    if (isValidPoint(pt, size)) {
                         when (editMode) {
                             InteractionState.NAVIGATION_MODE -> { onTargetSelected(pt); lastInteractionTime = System.currentTimeMillis() }
                             InteractionState.OBSTACLE_MODE -> onToggleObstacle(pt)
@@ -157,9 +164,9 @@ fun InteractiveRadarMap(
             // 🌟 避障模式保持画墙的 Drag，定位模式支持 Pinch-to-zoom + Pan
             .pointerInput(gridCoordinates, editMode) {
                 if (editMode == InteractionState.OBSTACLE_MODE) {
-                    detectDragGestures(onDragStart = { offset -> val pt = mapScreenToWorld(offset, size); if (isValidPoint(pt)) isErasingDrag = checkIsObstacle(pt) }) { change, _ ->
+                    detectDragGestures(onDragStart = { offset -> val pt = mapScreenToWorld(offset, size); if (isValidPoint(pt, size)) isErasingDrag = checkIsObstacle(pt) }) { change, _ ->
                         val pt = mapScreenToWorld(change.position, size)
-                        if (isValidPoint(pt)) onDragObstacle(pt, isErasingDrag)
+                        if (isValidPoint(pt, size)) onDragObstacle(pt, isErasingDrag)
                     }
                 } else if (editMode == InteractionState.NAVIGATION_MODE) {
                     detectTransformGestures { _, pan, zoom, _ ->

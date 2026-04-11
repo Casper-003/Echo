@@ -94,8 +94,7 @@ class SharedViewModel(application: Application) : AndroidViewModel(application) 
 
     // AR 扫描全局状态（提升到顶层，使 ArScannerScreen 能脱离 Pager padding 真正全屏）
     var isArScanning by mutableStateOf(false)
-    var rawPolygonToEdit by mutableStateOf<List<Point>?>(null)
-    var pendingGridPoints by mutableStateOf<List<Point>>(emptyList())
+    var rawPolygonToEdit by mutableStateOf<ScanResult?>(null)
     var pendingScanResult by mutableStateOf<ScanResult?>(null)
     // 从详情页"重新精修轮廓"进入时，携带该地图已有的底图路径，传给精修页作为初始值
     var pendingBgPath by mutableStateOf<String?>(null)

@@ -51,19 +51,47 @@ import kotlin.math.*
 
 /**
  * 扫描结果：
- *  - boundary   — 房间边界多边形（世界坐标系 X/Z，单位米，已 PCA 对齐）
- *  - gridPoints — 阶段二虚拟采集网格（射线法过滤，单位米，与 boundary 同坐标系）
+ *  - boundary  — 矩形4角点（世界坐标系，单位米，已归一化到原点）
+ *  - widthM    — 短边宽度（米）
+ *  - heightM   — 长边高度（米）
  */
 data class ScanResult(
     val boundary: List<Point>,
-    val gridPoints: List<Point> = emptyList()
+    val widthM: Double,
+    val heightM: Double
 )
 
 // =====================================================================================
-// ArScannerScreen — 手动打点建图模式
-// 复刻 ARCoreMeasuredDistance 的交互逻辑：
-//   点击地面放锚点 → 相邻连线 → 显示边长 → 支持撤销 → 完成后闭合多边形输出
+// ArScannerScreen — 两阶段矩形测量模式
+//   阶段1 MEASURE_LENGTH：打2点测长边 L + 方向向量
+//   阶段2 MEASURE_WIDTH ：打第3点，计算到第一段的垂直距离 W
+//   完成后 buildRectangle(p0, p1, w) → 4角点矩形
 // =====================================================================================
+
+private enum class MeasurePhase { MEASURE_LENGTH, MEASURE_WIDTH, DONE }
+
+/** 从 p0→p1 长边 + 宽度 w 构建矩形4角点（归一化到原点） */
+private fun buildRectangle(p0: Point, p1: Point, w: Double): ScanResult {
+    val dx = p1.x - p0.x; val dy = p1.y - p0.y
+    val len = sqrt(dx * dx + dy * dy).coerceAtLeast(0.01)
+    // 单位长边方向 + 单位宽边方向（左手垂直）
+    val ux = dx / len; val uy = dy / len
+    val vx = -uy;     val vy = ux
+    // 4角：p0, p1, p1+w*v, p0+w*v
+    val corners = listOf(
+        Point(p0.x,              p0.y),
+        Point(p1.x,              p1.y),
+        Point(p1.x + vx * w,    p1.y + vy * w),
+        Point(p0.x + vx * w,    p0.y + vy * w)
+    )
+    val minX = corners.minOf { it.x }; val minY = corners.minOf { it.y }
+    val normalized = corners.map { Point(it.x - minX, it.y - minY) }
+    return ScanResult(
+        boundary = normalized,
+        widthM   = w,
+        heightM  = len
+    )
+}
 
 @Composable
 fun ArScannerScreen(
@@ -77,39 +105,28 @@ fun ArScannerScreen(
     val coroutineScope = rememberCoroutineScope()
 
     // ── 状态 ──────────────────────────────────────────────────────────────────────────
-    var isTracking    by remember { mutableStateOf(false) }
-    var anchorPoints  by remember { mutableStateOf(listOf<Point>()) }
-    var segmentLengths by remember { mutableStateOf(listOf<Double>()) }
+    var isTracking by remember { mutableStateOf(false) }
+    var phase      by remember { mutableStateOf(MeasurePhase.MEASURE_LENGTH) }
+    var p0         by remember { mutableStateOf<Point?>(null) }
+    var p1         by remember { mutableStateOf<Point?>(null) }
+    // 当前已放置的点列表（供 MiniMap 显示）
+    val anchorPoints by remember { derivedStateOf { listOfNotNull(p0, p1) } }
 
-    // 动画阶段：uiReady = UI 元素飞入；cameraReady = 摄像头开启
     var uiReady     by remember { mutableStateOf(false) }
     var cameraReady by remember { mutableStateOf(false) }
 
     val sessionHolder = remember { ArSessionHolder() }
     var glView by remember { mutableStateOf<ArGLSurfaceView?>(null) }
 
-    // ── 进入序列：50ms 后 UI 飞入，再等 400ms 动画播完后开摄像头 ──────────────────────
     LaunchedEffect(Unit) {
-        delay(50)
-        uiReady = true
-        delay(400)
-        cameraReady = true
+        delay(50); uiReady = true
+        delay(400); cameraReady = true
     }
-
-    // ── cameraReady 变为 true 时，真正 resume GLSurfaceView ────────────────────────────
-    LaunchedEffect(cameraReady) {
-        if (cameraReady) {
-            glView?.onResume()
-        }
-    }
-
-    // ── AR Session 创建（不依赖 cameraReady，提前初始化省时间）──────────────────────────
+    LaunchedEffect(cameraReady) { if (cameraReady) glView?.onResume() }
     DisposableEffect(Unit) {
         if (activity != null) sessionHolder.create(activity)
         onDispose { sessionHolder.close() }
     }
-
-    // ── 生命周期：仅在 cameraReady 后才真正 resume/pause ──────────────────────────────
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -122,77 +139,82 @@ fun ArScannerScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val gridStepM = remember(sharedViewModel.gridSpacing) {
-        sharedViewModel.gridSpacing.toDoubleOrNull()?.coerceIn(0.5, 3.0) ?: 1.0
-    }
-    val canFinish = anchorPoints.size >= 3
-    val canUndo   = anchorPoints.isNotEmpty()
-
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
 
-        // ── 1. GLSurfaceView（始终存在，cameraReady 前不 resume）──────────────────────
+        // ── 1. GLSurfaceView ──────────────────────────────────────────────────────────
         AndroidView(
             factory = { ctx ->
                 ArGLSurfaceView(ctx, sessionHolder).also { view ->
                     glView = view
                     view.onTrackingChanged = { tracking -> isTracking = tracking }
                     view.onTapResult = { anchor, worldX, worldZ ->
-                        val newPoint = Point(worldX.toDouble(), worldZ.toDouble())
-                        val prev = anchorPoints.lastOrNull()
-                        val tooClose = prev != null && run {
-                            val dx = newPoint.x - prev.x
-                            val dy = newPoint.y - prev.y
-                            sqrt(dx * dx + dy * dy) < 0.3
-                        }
-                        if (tooClose) {
-                            anchor.detach()
-                            triggerVibration(ctx, doubleClick = true)
-                        } else {
-                            if (prev != null) {
-                                val dx = newPoint.x - prev.x
-                                val dy = newPoint.y - prev.y
-                                segmentLengths = segmentLengths + sqrt(dx * dx + dy * dy)
+                        val newPt = Point(worldX.toDouble(), worldZ.toDouble())
+                        when (phase) {
+                            MeasurePhase.MEASURE_LENGTH -> {
+                                if (p0 == null) {
+                                    p0 = newPt
+                                    triggerVibration(ctx)
+                                } else {
+                                    val dx = newPt.x - p0!!.x; val dy = newPt.y - p0!!.y
+                                    if (sqrt(dx * dx + dy * dy) < 0.3) {
+                                        anchor.detach(); triggerVibration(ctx, doubleClick = true)
+                                    } else {
+                                        p1 = newPt; phase = MeasurePhase.MEASURE_WIDTH
+                                        triggerVibration(ctx)
+                                    }
+                                }
                             }
-                            anchorPoints = anchorPoints + newPoint
-                            triggerVibration(ctx)
+                            MeasurePhase.MEASURE_WIDTH -> {
+                                // 计算 newPt 到 p0→p1 直线的垂直距离
+                                val a = p0!!; val b = p1!!
+                                val dx = b.x - a.x; val dy = b.y - a.y
+                                val len = sqrt(dx * dx + dy * dy).coerceAtLeast(0.01)
+                                val w = abs(dy * newPt.x - dx * newPt.y + b.x * a.y - b.y * a.x) / len
+                                if (w < 0.3) {
+                                    anchor.detach(); triggerVibration(ctx, doubleClick = true)
+                                } else {
+                                    phase = MeasurePhase.DONE
+                                    triggerVibration(ctx)
+                                    val result = buildRectangle(a, b, w)
+                                    coroutineScope.launch {
+                                        uiReady = false; delay(200)
+                                        sessionHolder.pause()
+                                        onComplete(result)
+                                    }
+                                }
+                            }
+                            MeasurePhase.DONE -> anchor.detach()
                         }
                     }
-                    // 不在 factory 里调用 onResume，由 cameraReady 控制
                 }
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        // ── 2. 准星（始终显示，随 uiReady 淡入）──────────────────────────────────────
+        // ── 2. 准星 ───────────────────────────────────────────────────────────────────
         AnimatedVisibility(
             visible = uiReady,
             enter = fadeIn(tween(400)),
             modifier = Modifier.align(Alignment.Center)
         ) {
             Canvas(modifier = Modifier.size(56.dp)) {
-                val s = size.minDimension
-                val arm = s * 0.30f
-                val sw = 2.5f
+                val s = size.minDimension; val arm = s * 0.30f; val sw = 2.5f
                 val color = Color.White.copy(alpha = 0.8f)
                 listOf(
                     Offset(0f, 0f) to listOf(Offset(arm, 0f), Offset(0f, arm)),
                     Offset(s, 0f)  to listOf(Offset(s - arm, 0f), Offset(s, arm)),
                     Offset(0f, s)  to listOf(Offset(arm, s), Offset(0f, s - arm)),
                     Offset(s, s)   to listOf(Offset(s - arm, s), Offset(s, s - arm))
-                ).forEach { (pivot, ends) ->
-                    ends.forEach { end -> drawLine(color, pivot, end, sw) }
-                }
+                ).forEach { (pivot, ends) -> ends.forEach { end -> drawLine(color, pivot, end, sw) } }
                 drawCircle(color, radius = 2.dp.toPx(), center = Offset(s / 2f, s / 2f))
             }
         }
 
-        // ── 3. 右上角 MiniMap ──────────────────────────────────────────────────────────
+        // ── 3. MiniMap ────────────────────────────────────────────────────────────────
         AnimatedVisibility(
-            visible = anchorPoints.isNotEmpty(),
+            visible = p0 != null,
             enter = fadeIn(tween(300)),
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 52.dp, end = 16.dp)
+            modifier = Modifier.align(Alignment.TopEnd).padding(top = 52.dp, end = 16.dp)
         ) {
             Card(
                 modifier = Modifier.size(120.dp),
@@ -208,116 +230,92 @@ fun ArScannerScreen(
             }
         }
 
-        // ── 4. 顶部栏（取消 + 状态提示）从上方滑入 ────────────────────────────────────
+        // ── 4. 顶部状态栏 ─────────────────────────────────────────────────────────────
         AnimatedVisibility(
             visible = uiReady,
             enter = slideInVertically(tween(400)) { -it } + fadeIn(tween(400)),
             exit  = slideOutVertically(tween(200)) { -it } + fadeOut(tween(200)),
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
+            modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
         ) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 48.dp, start = 8.dp, end = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 48.dp, start = 8.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 取消
                 IconButton(
                     onClick = {
                         coroutineScope.launch {
-                            // 先触发 UI 退出动画，再 pause session，避免 UI 挂在黑屏上
-                            uiReady = false
-                            delay(200)
-                            sessionHolder.pause()
-                            onCancel()
+                            uiReady = false; delay(200)
+                            sessionHolder.pause(); onCancel()
                         }
                     },
                     modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), CircleShape)
-                ) {
-                    Icon(Icons.Default.Close, contentDescription = "取消", tint = Color.White)
-                }
+                ) { Icon(Icons.Default.Close, contentDescription = "取消", tint = Color.White) }
 
                 Spacer(Modifier.width(8.dp))
 
-                // 状态提示
                 val statusText = when {
-                    !isTracking            -> "请缓慢移动设备，扫描地面"
-                    anchorPoints.isEmpty() -> "将准星对准墙角，按下放置"
-                    anchorPoints.size == 1 -> "继续放置锚点（至少 3 个）"
-                    anchorPoints.size == 2 -> "再放置 1 个即可完成"
-                    else                   -> "已放置 ${anchorPoints.size} 个点，可继续或完成"
+                    !isTracking                              -> "请缓慢移动设备，扫描地面"
+                    phase == MeasurePhase.MEASURE_LENGTH && p0 == null -> "将准星对准房间一角，按下放置第1点"
+                    phase == MeasurePhase.MEASURE_LENGTH     -> "沿墙走到对角，放置第2点（测长边）"
+                    phase == MeasurePhase.MEASURE_WIDTH      -> {
+                        val len = p0?.let { a -> p1?.let { b ->
+                            val dx = b.x - a.x; val dy = b.y - a.y
+                            "长边 ${"%.2f".format(sqrt(dx*dx+dy*dy))} m，走到侧墙放置第3点（测宽）"
+                        }} ?: ""
+                        len
+                    }
+                    else -> "测量完成"
                 }
                 Box(
                     modifier = Modifier
                         .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(20.dp))
                         .padding(horizontal = 14.dp, vertical = 6.dp)
                 ) {
-                    Text(
-                        statusText,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color.White.copy(alpha = 0.9f)
-                    )
+                    Text(statusText, style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.9f))
                 }
             }
         }
 
-        // ── 5. 边长标签（左侧浮动）────────────────────────────────────────────────────
-        if (segmentLengths.isNotEmpty()) {
+        // ── 5. 已测尺寸标签 ──────────────────────────────────────────────────────────
+        if (p0 != null && p1 != null) {
+            val dx = p1!!.x - p0!!.x; val dy = p1!!.y - p0!!.y
+            val len = sqrt(dx * dx + dy * dy)
             Column(
                 modifier = Modifier
                     .align(Alignment.CenterStart)
                     .padding(start = 12.dp)
                     .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
             ) {
-                val display  = segmentLengths.takeLast(3)
-                val startIdx = segmentLengths.size - display.size
-                display.forEachIndexed { i, len ->
-                    Text(
-                        text = "段${startIdx + i + 1}：${"%.0f".format(len * 100)} cm",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF00E5FF)
-                    )
-                }
-                if (canFinish) {
-                    val a = anchorPoints.first(); val b = anchorPoints.last()
-                    val closingLen = sqrt((a.x - b.x).pow(2) + (a.y - b.y).pow(2))
-                    Text(
-                        text = "闭合：${"%.0f".format(closingLen * 100)} cm",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF69F0AE)
-                    )
-                }
+                Text("长边：${"%.2f".format(len)} m", style = MaterialTheme.typography.labelSmall, color = Color(0xFF00E5FF))
             }
         }
 
-        // ── 6. 底部三按钮：从下方滑入 ─────────────────────────────────────────────────
-        // 布局：[撤销 48dp] ──── [放置 72dp] ──── [完成 48dp]
+        // ── 6. 底部操作栏 ─────────────────────────────────────────────────────────────
         AnimatedVisibility(
             visible = uiReady,
             enter = slideInVertically(tween(400)) { it } + fadeIn(tween(400)),
             exit  = slideOutVertically(tween(200)) { it } + fadeOut(tween(200)),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(bottom = 48.dp)
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 48.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 撤销（小）
+                // 撤销：回退到上一阶段
+                val canUndo = p0 != null
                 FilledIconButton(
                     onClick = {
-                        if (canUndo) {
-                            sessionHolder.undoLastAnchor()
-                            anchorPoints = anchorPoints.dropLast(1)
-                            if (segmentLengths.isNotEmpty())
-                                segmentLengths = segmentLengths.dropLast(1)
+                        when {
+                            phase == MeasurePhase.MEASURE_WIDTH -> {
+                                sessionHolder.undoLastAnchor()
+                                p1 = null; phase = MeasurePhase.MEASURE_LENGTH
+                            }
+                            p0 != null -> {
+                                sessionHolder.undoLastAnchor()
+                                p0 = null
+                            }
                         }
                     },
                     enabled = canUndo,
@@ -332,41 +330,23 @@ fun ArScannerScreen(
                     Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "撤销", modifier = Modifier.size(20.dp))
                 }
 
-                // 放置（大）
+                // 放置按钮
                 FilledIconButton(
                     onClick = { glView?.hitTestCenter() },
+                    enabled = isTracking && phase != MeasurePhase.DONE,
                     modifier = Modifier.size(72.dp),
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        disabledContainerColor = Color.White.copy(alpha = 0.12f),
+                        disabledContentColor = Color.White.copy(alpha = 0.3f)
                     )
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "放置锚点", modifier = Modifier.size(32.dp))
+                    Icon(Icons.Default.Add, contentDescription = "放置点", modifier = Modifier.size(32.dp))
                 }
 
-                // 完成（小）
-                FilledIconButton(
-                    onClick = {
-                        val boundary = alignToScreen(rdpSimplify(anchorPoints, 0.1))
-                        val gridPts  = generateVirtualGrid(boundary, gridStepM)
-                        coroutineScope.launch {
-                            uiReady = false
-                            delay(200)
-                            sessionHolder.pause()
-                            onComplete(ScanResult(boundary, gridPts))
-                        }
-                    },
-                    enabled = canFinish,
-                    modifier = Modifier.size(48.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = Color(0xFF00897B),
-                        contentColor = Color.White,
-                        disabledContainerColor = Color.White.copy(alpha = 0.06f),
-                        disabledContentColor = Color.White.copy(alpha = 0.25f)
-                    )
-                ) {
-                    Icon(Icons.Default.Check, contentDescription = "完成", modifier = Modifier.size(20.dp))
-                }
+                // 占位（保持三列对称）
+                Spacer(modifier = Modifier.size(48.dp))
             }
         }
     }

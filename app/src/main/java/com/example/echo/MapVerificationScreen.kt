@@ -39,8 +39,7 @@ import kotlin.math.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MapVerificationScreen(
-    rawPolygon: List<Point>,
-    rawObstacles: List<Point> = emptyList(),
+    scanResult: ScanResult,
     sharedViewModel: SharedViewModel,
     onSaveSuccess: () -> Unit,
     onDiscard: () -> Unit,
@@ -51,8 +50,7 @@ fun MapVerificationScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    var editedPolygon by remember { mutableStateOf(rawPolygon) }
-    var showObstacles by remember { mutableStateOf(rawObstacles.isNotEmpty()) }
+    var editedPolygon by remember { mutableStateOf(scanResult.boundary) }
 
     // 90° 旋转动画
     val snap90Anim = remember { Animatable(0f) }
@@ -79,7 +77,12 @@ fun MapVerificationScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("地图轮廓精修", fontWeight = FontWeight.Bold) },
+                title = {
+                    Text(
+                        "%.2f m × %.2f m".format(scanResult.widthM, scanResult.heightM),
+                        fontWeight = FontWeight.Bold
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = onDiscard) { Icon(Icons.Default.Close, contentDescription = "放弃") }
                 },
@@ -89,13 +92,8 @@ fun MapVerificationScreen(
                             if (editedPolygon.size < 3) return@Button
 
                             val minX = editedPolygon.minOf { it.x }
-                            val maxX = editedPolygon.maxOf { it.x }
                             val minY = editedPolygon.minOf { it.y }
-                            val maxY = editedPolygon.maxOf { it.y }
-
                             val normalizedPolygon = editedPolygon.map { Point(it.x - minX, it.y - minY) }
-                            val finalWidth = maxX - minX
-                            val finalLength = maxY - minY
 
                             // 将底图从外部 URI 复制到 App 私有目录（若用户选了图）
                             val savedBgUri = bgImageUri?.let { uri ->
@@ -116,24 +114,12 @@ fun MapVerificationScreen(
                                 .maxOrNull()?.plus(1) ?: 1
                             sharedViewModel.createNewMap(
                                 name = "$prefix$nextIndex",
-                                w = finalWidth,
-                                l = finalLength,
+                                w = scanResult.widthM,
+                                l = scanResult.heightM,
                                 isAr = true,
                                 polygon = normalizedPolygon,
                                 bgImageUri = savedBgUri
                             )
-                            if (rawObstacles.isNotEmpty()) {
-                                val normalizedObstacles = rawObstacles.map { Point(it.x - minX, it.y - minY) }
-                                coroutineScope.launch {
-                                    var waited = 0
-                                    while (sharedViewModel.currentActiveMapId.value == null && waited < 2000) {
-                                        kotlinx.coroutines.delay(50); waited += 50
-                                    }
-                                    sharedViewModel.currentActiveMapId.value?.let { mapId ->
-                                        sharedViewModel.saveObstaclesForMap(mapId, normalizedObstacles)
-                                    }
-                                }
-                            }
                             onSaveSuccess()
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50)),
@@ -210,27 +196,6 @@ fun MapVerificationScreen(
                         .fillMaxSize()
                         .graphicsLayer { rotationZ = snap90Anim.value }
                 )
-
-                if (showObstacles && rawObstacles.isNotEmpty() && editedPolygon.size >= 2) {
-                    val obstacleColor = Color(0xFFFF7043).copy(alpha = 0.7f)
-                    Canvas(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .graphicsLayer { rotationZ = snap90Anim.value }
-                    ) {
-                        val minX = editedPolygon.minOf { it.x }; val maxX = editedPolygon.maxOf { it.x }
-                        val minY = editedPolygon.minOf { it.y }; val maxY = editedPolygon.maxOf { it.y }
-                        val rangeX = (maxX - minX).coerceAtLeast(0.01); val rangeY = (maxY - minY).coerceAtLeast(0.01)
-                        val scale = minOf(size.width / rangeX.toFloat(), size.height / rangeY.toFloat()) * 0.8f
-                        val offX = size.width / 2f - ((minX + maxX) / 2f * scale).toFloat()
-                        val offY = size.height / 2f - ((minY + maxY) / 2f * scale).toFloat()
-                        val cellPx = 0.15f * scale
-                        rawObstacles.forEach { obs ->
-                            val cx = offX + obs.x.toFloat() * scale; val cy = offY + obs.y.toFloat() * scale
-                            drawRect(color = obstacleColor, topLeft = Offset(cx - cellPx / 2, cy - cellPx / 2), size = androidx.compose.ui.geometry.Size(cellPx, cellPx))
-                        }
-                    }
-                }
             }
 
             // 底图透明度调节（仅当有底图时显示）
@@ -305,28 +270,6 @@ fun MapVerificationScreen(
                         Text("导入底图", style = MaterialTheme.typography.labelSmall)
                     }
 
-                    // BEV 扫描生成底图入口（待实现）
-                    // TODO: BEV_SCAN 入口
-                    // 短期目标：语义分割 + IPM 方案
-                    //   1. 引导用户缓慢平移拍摄地面多帧
-                    //   2. MobileNetV3-Small（TFLite，~8MB）逐帧分割地板区域
-                    //   3. 根据陀螺仪姿态矩阵做逆透视变换（IPM）展平每帧
-                    //   4. ORB 特征点匹配拼接多帧，覆盖 map.width × map.length 范围
-                    //   5. 输出 JPG 回调至此处 bgImageUri（与相册选图完全一致的接入点）
-                    // 长期目标：端到端 BEV（RoomFormer ONNX 量化版，目标 <50MB）
-                    //   参考：github.com/ywyue/RoomFormer
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        FilledIconButton(
-                            onClick = { /* TODO: 启动 BEV 扫描 Activity */ },
-                            enabled = false, // 待实现
-                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                        ) {
-                            Icon(Icons.Default.AutoAwesome, contentDescription = "AI 扫描生成底图", tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("AI 扫描", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                    }
-
                     // 复位底图
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         FilledIconButton(
@@ -349,24 +292,6 @@ fun MapVerificationScreen(
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text("重新扫描", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
-                    }
-
-                    // 障碍物显隐（仅扫描时有障碍物数据才显示）
-                    if (rawObstacles.isNotEmpty()) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            FilledIconButton(
-                                onClick = { showObstacles = !showObstacles },
-                                colors = IconButtonDefaults.filledIconButtonColors(
-                                    containerColor = if (showObstacles) Color(0xFFFF7043) else MaterialTheme.colorScheme.surfaceVariant
-                                )
-                            ) {
-                                Icon(Icons.Default.Warning, contentDescription = "显示/隐藏障碍物",
-                                    tint = if (showObstacles) Color.White else MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("障碍(${rawObstacles.size})", style = MaterialTheme.typography.labelSmall,
-                                color = if (showObstacles) Color(0xFFFF7043) else MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
                     }
                 }
             }

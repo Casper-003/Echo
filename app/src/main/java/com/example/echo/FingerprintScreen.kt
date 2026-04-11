@@ -372,10 +372,10 @@ fun FingerprintManagerScreen(sharedViewModel: SharedViewModel, bottomPadding: Dp
                             sharedTransitionScope = this@SharedTransitionLayout,
                             bottomPadding = bottomPadding,
                             onBack = { selectedMap = null },
-                            onReEdit = { poly ->
+                            onReEdit = { scanResult ->
                                 selectedMap = null
                                 sharedViewModel.pendingBgPath = targetMap.bgImageUri.ifEmpty { null }
-                                sharedViewModel.rawPolygonToEdit = poly
+                                sharedViewModel.rawPolygonToEdit = scanResult
                             }
                         )
                     }
@@ -581,7 +581,7 @@ fun MapDetailScreen(
     sharedTransitionScope: SharedTransitionScope,
     bottomPadding: Dp,
     onBack: () -> Unit,
-    onReEdit: ((List<Point>) -> Unit)? = null
+    onReEdit: ((ScanResult) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val formatter = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()) }
@@ -726,7 +726,11 @@ fun MapDetailScreen(
                 // 重新精修按钮（仅 AR 扫描地图且有多边形数据时显示）
                 if (onReEdit != null && polygon.isNotEmpty()) {
                     OutlinedButton(
-                        onClick = { onReEdit(polygon) },
+                        onClick = {
+                            val w = map.width
+                            val h = map.length
+                            onReEdit(ScanResult(polygon, widthM = w, heightM = h))
+                        },
                         modifier = Modifier.fillMaxWidth().height(52.dp).padding(bottom = 8.dp),
                         shape = RoundedCornerShape(16.dp)
                     ) {
@@ -1118,34 +1122,49 @@ fun CollectionMapScreen(sharedViewModel: SharedViewModel, onBackClick: () -> Uni
 
     val controlContent = @Composable {
         Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))) {
-            Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
-                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("当前选定坐标", style = MaterialTheme.typography.labelMedium, color = Color.Gray); Spacer(modifier = Modifier.height(4.dp))
-                        Text(text = if (selectedPoint != null) "X: ${selectedPoint!!.x}, Y: ${selectedPoint!!.y}" else "请在地图上选点", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = if (selectedPoint != null) MaterialTheme.colorScheme.primary else Color.Gray); Spacer(modifier = Modifier.height(4.dp))
-                        Text(text = if (sharedViewModel.selectedDevices.isEmpty()) "❌ 未锁定基站" else if (sharedViewModel.is360CollectionModeEnabled) "↻ 360° 旋转采集模式" else "⚡ 极速单点模式", style = MaterialTheme.typography.labelMedium, color = if (sharedViewModel.selectedDevices.isEmpty()) MaterialTheme.colorScheme.error else Color.Gray)
-                        Spacer(modifier = Modifier.height(12.dp)); Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary); Spacer(modifier = Modifier.width(4.dp)); Text("双击已采集点可直接删除", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold) }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (selectedPoint != null) "X: ${selectedPoint!!.x},  Y: ${selectedPoint!!.y}" else "请在地图上选点",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (selectedPoint != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    if (sharedViewModel.selectedDevices.isEmpty()) {
+                        Text("未锁定基站", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                    } else {
+                        Text(
+                            text = if (sharedViewModel.is360CollectionModeEnabled) "360° 旋转采集模式" else "极速单点模式",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(88.dp)) {
-                        if (isRecording && sharedViewModel.is360CollectionModeEnabled) {
-                            CircularProgressIndicator(progress = { 1f }, color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f), strokeWidth = 8.dp, modifier = Modifier.fillMaxSize())
-                            CircularProgressIndicator(progress = { collectionProgress }, color = MaterialTheme.colorScheme.primary, strokeWidth = 8.dp, modifier = Modifier.fillMaxSize())
-                            Text(text = "${(collectionProgress * 100).toInt()}%", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
-                        } else {
-                            val canRecord = selectedPoint != null && sharedViewModel.selectedDevices.isNotEmpty()
-                            FilledIconButton(onClick = {
-                                if (canRecord) {
-                                    isRecording = true
-                                    if (!sharedViewModel.is360CollectionModeEnabled) {
-                                        val fingerprintMap = sharedViewModel.selectedDevices.keys.associateWith { mac -> liveDevices.find { it.macAddress == mac }?.smoothedRssi ?: -100 }
-                                        val newPoint = ReferencePoint(id = "PT_${selectedPoint!!.x}_${selectedPoint!!.y}", coordinate = selectedPoint!!, fingerprint = fingerprintMap)
-                                        sharedViewModel.updateRecordedPoints(sharedViewModel.recordedPoints.filter { it.coordinate != selectedPoint } + newPoint)
-                                        isRecording = false
-                                    }
+                }
+                Spacer(modifier = Modifier.width(16.dp))
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.size(72.dp)) {
+                    if (isRecording && sharedViewModel.is360CollectionModeEnabled) {
+                        CircularProgressIndicator(progress = { 1f }, color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f), strokeWidth = 6.dp, modifier = Modifier.fillMaxSize())
+                        CircularProgressIndicator(progress = { collectionProgress }, color = MaterialTheme.colorScheme.primary, strokeWidth = 6.dp, modifier = Modifier.fillMaxSize())
+                        Text(text = "${(collectionProgress * 100).toInt()}%", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+                    } else {
+                        val canRecord = selectedPoint != null && sharedViewModel.selectedDevices.isNotEmpty()
+                        FilledIconButton(onClick = {
+                            if (canRecord) {
+                                isRecording = true
+                                if (!sharedViewModel.is360CollectionModeEnabled) {
+                                    val fingerprintMap = sharedViewModel.selectedDevices.keys.associateWith { mac -> liveDevices.find { it.macAddress == mac }?.smoothedRssi ?: -100 }
+                                    val newPoint = ReferencePoint(id = "PT_${selectedPoint!!.x}_${selectedPoint!!.y}", coordinate = selectedPoint!!, fingerprint = fingerprintMap)
+                                    sharedViewModel.updateRecordedPoints(sharedViewModel.recordedPoints.filter { it.coordinate != selectedPoint } + newPoint)
+                                    isRecording = false
                                 }
-                            }, enabled = canRecord, modifier = Modifier.fillMaxSize(), shape = CircleShape, colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary, disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                                Icon(imageVector = if (sharedViewModel.is360CollectionModeEnabled) Icons.Default.Refresh else Icons.Default.Add, contentDescription = "采集", modifier = Modifier.size(44.dp), tint = if (canRecord) MaterialTheme.colorScheme.onPrimary else Color.Gray)
                             }
+                        }, enabled = canRecord, modifier = Modifier.fillMaxSize(), shape = CircleShape, colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary, disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                            Icon(imageVector = if (sharedViewModel.is360CollectionModeEnabled) Icons.Default.Refresh else Icons.Default.Add, contentDescription = "采集", modifier = Modifier.size(36.dp), tint = if (canRecord) MaterialTheme.colorScheme.onPrimary else Color.Gray)
                         }
                     }
                 }

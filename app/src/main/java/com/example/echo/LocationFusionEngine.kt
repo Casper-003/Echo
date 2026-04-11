@@ -40,6 +40,8 @@ class LocationFusionEngine(context: Context) : SensorEventListener {
     // 🌟 动态权重经验阈值
     private val GOOD_SIGNAL_D = 2.0
     private val BAD_SIGNAL_D = 8.0
+    // BLE 权重上限：保留 PDR 最低 15% 平滑贡献，抑制强 LOS 下的微观抖动暴露，经验范围 0.80~0.90
+    private val MAX_BLE_WEIGHT = 0.85
 
     fun start() {
         stepDetector?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST) }
@@ -58,11 +60,11 @@ class LocationFusionEngine(context: Context) : SensorEventListener {
             _purePdrPosition.value = blePoint
             _currentBleWeight.value = 1.0
         } else {
-            // 1. 计算动态信任权重 (Linear Mapping)
+            // 1. 计算动态信任权重 (Linear Mapping，分段线性近似指数衰减)
             val wBle = when {
-                minD1 <= GOOD_SIGNAL_D -> 0.9
+                minD1 <= GOOD_SIGNAL_D -> MAX_BLE_WEIGHT
                 minD1 >= BAD_SIGNAL_D -> 0.1
-                else -> 0.9 - ((minD1 - GOOD_SIGNAL_D) / (BAD_SIGNAL_D - GOOD_SIGNAL_D)) * (0.9 - 0.1)
+                else -> MAX_BLE_WEIGHT - ((minD1 - GOOD_SIGNAL_D) / (BAD_SIGNAL_D - GOOD_SIGNAL_D)) * (MAX_BLE_WEIGHT - 0.1)
             }
             _currentBleWeight.value = wBle
 

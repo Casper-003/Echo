@@ -52,6 +52,9 @@ import kotlin.math.min
 @Composable
 fun InteractiveRadarMap(
     modifier: Modifier = Modifier,
+    mapPolygon: List<Point> = emptyList(), // 🌟 新增：接收 AR 测绘多边形
+    mapWidth: Double = 0.0,  // 明确指定地图宽度，0 表示从 gridCoordinates 推断
+    mapHeight: Double = 0.0, // 明确指定地图高度，0 表示从 gridCoordinates 推断
     gridCoordinates: List<Point>,
     recordedPoints: List<Point>,
     selectedPoint: Point? = null,
@@ -69,8 +72,8 @@ fun InteractiveRadarMap(
     onDragObstacle: (Point, Boolean) -> Unit = { _, _ -> },
     checkIsObstacle: (Point) -> Boolean = { false }
 ) {
-    val maxX = gridCoordinates.maxOfOrNull { it.x }?.coerceAtLeast(1.0) ?: 10.0
-    val maxY = gridCoordinates.maxOfOrNull { it.y }?.coerceAtLeast(1.0) ?: 10.0
+    val maxX = if (mapWidth > 0.0) mapWidth else gridCoordinates.maxOfOrNull { it.x }?.coerceAtLeast(1.0) ?: 10.0
+    val maxY = if (mapHeight > 0.0) mapHeight else gridCoordinates.maxOfOrNull { it.y }?.coerceAtLeast(1.0) ?: 10.0
     val density = LocalDensity.current
     val paddingPx = remember(density) { with(density) { 40.dp.toPx() } }
     val themePrimaryColor = MaterialTheme.colorScheme.primary
@@ -100,12 +103,17 @@ fun InteractiveRadarMap(
     }
 
     fun mapScreenToWorld(offset: Offset, size: IntSize): Point {
-        val scaleX = (size.width - paddingPx * 2) / maxX
-        val scaleY = (size.height - paddingPx * 2) / maxY
+        val scaleRaw = min(
+            (size.width - paddingPx * 2) / maxX,
+            (size.height - paddingPx * 2) / maxY
+        )
+        val scaleX = scaleRaw; val scaleY = scaleRaw
         val canvasCenterX = size.width / 2f
         val canvasCenterY = size.height / 2f
+        val originX = canvasCenterX - (maxX * scaleX / 2f).toFloat()
+        val originY = canvasCenterY - (maxY * scaleY / 2f).toFloat()
 
-        // 🌟 逆向抵消缩放
+        // 逆向抵消缩放
         val unZoomedX = canvasCenterX + (offset.x - canvasCenterX) / zoomAnimatable.value
         val unZoomedY = canvasCenterY + (offset.y - canvasCenterY) / zoomAnimatable.value
 
@@ -113,8 +121,8 @@ fun InteractiveRadarMap(
         var mapPy = unZoomedY - panAnimatable.value.y
 
         if (currentIsFollowing && currentPredictedPoint != null && editMode == InteractionState.NAVIGATION_MODE) {
-            val userCx = paddingPx + (currentPredictedPoint!!.x * scaleX).toFloat()
-            val userCy = paddingPx + (currentPredictedPoint!!.y * scaleY).toFloat()
+            val userCx = originX + (currentPredictedPoint!!.x * scaleX).toFloat()
+            val userCy = originY + (currentPredictedPoint!!.y * scaleY).toFloat()
             mapPx -= (canvasCenterX - userCx); mapPy -= (canvasCenterY - userCy)
             val rad = Math.toRadians((currentHeadingState ?: 0f).toDouble())
             val cosVal = cos(rad).toFloat(); val sinVal = sin(rad).toFloat()
@@ -122,11 +130,18 @@ fun InteractiveRadarMap(
             mapPx = dx * cosVal - dy * sinVal + userCx; mapPy = dx * sinVal + dy * cosVal + userCy
         }
 
-        val tapX = (mapPx - paddingPx) / scaleX; val tapY = (mapPy - paddingPx) / scaleY
+        val tapX = (mapPx - originX) / scaleX; val tapY = (mapPy - originY) / scaleY
         return Point(tapX.toDouble(), tapY.toDouble())
     }
 
-    fun isValidPoint(pt: Point): Boolean { return pt.x >= -0.1 && pt.x <= maxX + 0.1 && pt.y >= -0.1 && pt.y <= maxY + 0.1 }
+    fun isValidPoint(pt: Point, sizePx: IntSize): Boolean {
+        val scale = min(
+            (sizePx.width - paddingPx * 2) / maxX,
+            (sizePx.height - paddingPx * 2) / maxY
+        )
+        val tol = (paddingPx / scale).coerceAtLeast(0.5)
+        return pt.x >= -tol && pt.x <= maxX + tol && pt.y >= -tol && pt.y <= maxY + tol
+    }
 
     Canvas(
         modifier = modifier
@@ -134,7 +149,7 @@ fun InteractiveRadarMap(
             .pointerInput(gridCoordinates, editMode) {
                 detectTapGestures { offset ->
                     val pt = mapScreenToWorld(offset, size)
-                    if (isValidPoint(pt)) {
+                    if (isValidPoint(pt, size)) {
                         when (editMode) {
                             InteractionState.NAVIGATION_MODE -> { onTargetSelected(pt); lastInteractionTime = System.currentTimeMillis() }
                             InteractionState.OBSTACLE_MODE -> onToggleObstacle(pt)
@@ -149,9 +164,9 @@ fun InteractiveRadarMap(
             // 🌟 避障模式保持画墙的 Drag，定位模式支持 Pinch-to-zoom + Pan
             .pointerInput(gridCoordinates, editMode) {
                 if (editMode == InteractionState.OBSTACLE_MODE) {
-                    detectDragGestures(onDragStart = { offset -> val pt = mapScreenToWorld(offset, size); if (isValidPoint(pt)) isErasingDrag = checkIsObstacle(pt) }) { change, _ ->
+                    detectDragGestures(onDragStart = { offset -> val pt = mapScreenToWorld(offset, size); if (isValidPoint(pt, size)) isErasingDrag = checkIsObstacle(pt) }) { change, _ ->
                         val pt = mapScreenToWorld(change.position, size)
-                        if (isValidPoint(pt)) onDragObstacle(pt, isErasingDrag)
+                        if (isValidPoint(pt, size)) onDragObstacle(pt, isErasingDrag)
                     }
                 } else if (editMode == InteractionState.NAVIGATION_MODE) {
                     detectTransformGestures { _, pan, zoom, _ ->
@@ -164,10 +179,18 @@ fun InteractiveRadarMap(
                 }
             }
     ) {
-        val scaleX = (size.width - paddingPx * 2) / maxX; val scaleY = (size.height - paddingPx * 2) / maxY
+        // 等比例缩放：取较小的缩放因子，保证地图完整显示且不变形
+        val scaleRaw = min(
+            (size.width - paddingPx * 2) / maxX,
+            (size.height - paddingPx * 2) / maxY
+        )
+        val scaleX = scaleRaw; val scaleY = scaleRaw
         val canvasCenterX = size.width / 2f; val canvasCenterY = size.height / 2f
-        val userCx = predictedPoint?.let { paddingPx + (it.x * scaleX).toFloat() } ?: canvasCenterX
-        val userCy = predictedPoint?.let { paddingPx + (it.y * scaleY).toFloat() } ?: canvasCenterY
+        // 地图居中：以画布中心为基准，向两侧展开
+        val originX = canvasCenterX - (maxX * scaleX / 2f).toFloat()
+        val originY = canvasCenterY - (maxY * scaleY / 2f).toFloat()
+        val userCx = predictedPoint?.let { originX + (it.x * scaleX).toFloat() } ?: canvasCenterX
+        val userCy = predictedPoint?.let { originY + (it.y * scaleY).toFloat() } ?: canvasCenterY
         val heading = currentHeading ?: 0f
         val applyTransform = isMapFollowingMode && predictedPoint != null && editMode == InteractionState.NAVIGATION_MODE
 
@@ -190,39 +213,60 @@ fun InteractiveRadarMap(
             val gridLineColor = Color.Gray.copy(alpha = 0.1f)
             val strokeWidth = 1.dp.toPx()
 
-            for (c in startCol..endCol) { val cx = paddingPx + (c * gridResolution * scaleX).toFloat(); drawLine(color = gridLineColor, start = Offset(cx, paddingPx + (startRow * gridResolution * scaleY).toFloat()), end = Offset(cx, paddingPx + (endRow * gridResolution * scaleY).toFloat()), strokeWidth = strokeWidth, pathEffect = dashPathEffect) }
-            for (r in startRow..endRow) { val cy = paddingPx + (r * gridResolution * scaleY).toFloat(); drawLine(color = gridLineColor, start = Offset(paddingPx + (startCol * gridResolution * scaleX).toFloat(), cy), end = Offset(paddingPx + (endCol * gridResolution * scaleX).toFloat(), cy), strokeWidth = strokeWidth, pathEffect = dashPathEffect) }
-            for (c in startCol..endCol) { for (r in startRow..endRow) { val cx = paddingPx + (c * gridResolution * scaleX).toFloat(); val cy = paddingPx + (r * gridResolution * scaleY).toFloat(); drawCircle(color = Color.Gray.copy(alpha = 0.15f), radius = 3.dp.toPx(), center = Offset(cx, cy)) } }
+            for (c in startCol..endCol) { val cx = originX + (c * gridResolution * scaleX).toFloat(); drawLine(color = gridLineColor, start = Offset(cx, originY + (startRow * gridResolution * scaleY).toFloat()), end = Offset(cx, originY + (endRow * gridResolution * scaleY).toFloat()), strokeWidth = strokeWidth, pathEffect = dashPathEffect) }
+            for (r in startRow..endRow) { val cy = originY + (r * gridResolution * scaleY).toFloat(); drawLine(color = gridLineColor, start = Offset(originX + (startCol * gridResolution * scaleX).toFloat(), cy), end = Offset(originX + (endCol * gridResolution * scaleX).toFloat(), cy), strokeWidth = strokeWidth, pathEffect = dashPathEffect) }
+            for (c in startCol..endCol) { for (r in startRow..endRow) { val cx = originX + (c * gridResolution * scaleX).toFloat(); val cy = originY + (r * gridResolution * scaleY).toFloat(); drawCircle(color = Color.Gray.copy(alpha = 0.15f), radius = 3.dp.toPx(), center = Offset(cx, cy)) } }
 
-            val roomTopLeft = Offset(paddingPx, paddingPx)
-            val roomSize = Size((maxX * scaleX).toFloat(), (maxY * scaleY).toFloat())
-            drawRect(color = themePrimaryColor.copy(alpha = 0.03f), topLeft = roomTopLeft, size = roomSize)
-            drawRect(color = themePrimaryColor.copy(alpha = 0.35f), topLeft = roomTopLeft, size = roomSize, style = Stroke(width = 2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(20f, 20f), 0f)))
+            // 🌟 核心渲染升级：抛弃矩形，绘制真实的 AR 多边形边界！
+            if (mapPolygon.isNotEmpty()) {
+                val polyPath = Path().apply {
+                    mapPolygon.forEachIndexed { index, pt ->
+                        val px = originX + (pt.x * scaleX).toFloat()
+                        val py = originY + (pt.y * scaleY).toFloat()
+                        if (index == 0) moveTo(px, py) else lineTo(px, py)
+                    }
+                    close()
+                }
+                // 填充内部光晕
+                drawPath(path = polyPath, color = themePrimaryColor.copy(alpha = 0.05f))
+                // 绘制虚线边界墙体
+                drawPath(
+                    path = polyPath,
+                    color = themePrimaryColor.copy(alpha = 0.5f),
+                    style = Stroke(width = 3.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(15f, 15f), 0f))
+                )
+            } else {
+                // 兜底逻辑：如果不是 AR 生成的图，依然画矩形包围盒
+                val roomTopLeft = Offset(originX, originY)
+                val roomSize = Size((maxX * scaleX).toFloat(), (maxY * scaleY).toFloat())
+                drawRect(color = themePrimaryColor.copy(alpha = 0.03f), topLeft = roomTopLeft, size = roomSize)
+                drawRect(color = themePrimaryColor.copy(alpha = 0.35f), topLeft = roomTopLeft, size = roomSize, style = Stroke(width = 2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(20f, 20f), 0f)))
+            }
 
             val obsColor = Color.Gray.copy(alpha = 0.7f)
-            obstacles.forEach { obs -> drawRect(color = obsColor, topLeft = Offset(paddingPx + ((obs.x / gridResolution).toInt() * gridResolution * scaleX).toFloat(), paddingPx + ((obs.y / gridResolution).toInt() * gridResolution * scaleY).toFloat()), size = Size((gridResolution * scaleX).toFloat(), (gridResolution * scaleY).toFloat())) }
+            obstacles.forEach { obs -> drawRect(color = obsColor, topLeft = Offset(originX + ((obs.x / gridResolution).toInt() * gridResolution * scaleX).toFloat(), originY + ((obs.y / gridResolution).toInt() * gridResolution * scaleY).toFloat()), size = Size((gridResolution * scaleX).toFloat(), (gridResolution * scaleY).toFloat())) }
 
             if (currentPath.isNotEmpty()) {
                 val path = Path()
-                currentPath.forEachIndexed { index, pt -> val px = paddingPx + (pt.x * scaleX).toFloat(); val py = paddingPx + (pt.y * scaleY).toFloat(); if (index == 0) path.moveTo(px, py) else path.lineTo(px, py) }
+                currentPath.forEachIndexed { index, pt -> val px = originX + (pt.x * scaleX).toFloat(); val py = originY + (pt.y * scaleY).toFloat(); if (index == 0) path.moveTo(px, py) else path.lineTo(px, py) }
                 drawPath(path = path, color = Color(0xFF1976D2).copy(alpha = 0.9f), style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round, pathEffect = PathEffect.dashPathEffect(floatArrayOf(15f, 15f), 0f)))
             }
 
             gridCoordinates.forEach { pt ->
-                val cx = paddingPx + (pt.x * scaleX).toFloat(); val cy = paddingPx + (pt.y * scaleY).toFloat(); val isRecorded = recordedPoints.contains(pt); val isSelected = selectedPoint == pt
+                val cx = originX + (pt.x * scaleX).toFloat(); val cy = originY + (pt.y * scaleY).toFloat(); val isRecorded = recordedPoints.contains(pt); val isSelected = selectedPoint == pt
                 drawCircle(color = if (isRecorded) Color(0xFF4CAF50) else Color.Gray.copy(alpha = 0.4f), radius = if (isSelected) 6.dp.toPx() else 4.dp.toPx(), center = Offset(cx, cy))
                 if (isSelected && editMode != InteractionState.NAVIGATION_MODE) drawCircle(color = Color(0xFF1976D2).copy(alpha = 0.6f), radius = 14.dp.toPx(), center = Offset(cx, cy), style = Stroke(width = 3.dp.toPx()))
             }
 
             predictedPoint?.let { pos ->
-                val cx = paddingPx + (pos.x * scaleX).toFloat(); val cy = paddingPx + (pos.y * scaleY).toFloat()
+                val cx = originX + (pos.x * scaleX).toFloat(); val cy = originY + (pos.y * scaleY).toFloat()
                 drawCircle(color = Color(0xFFE53935).copy(alpha = 0.2f), radius = 24.dp.toPx(), center = Offset(cx, cy)); drawCircle(color = Color(0xFFE53935), radius = 6.dp.toPx(), center = Offset(cx, cy))
                 if (editMode == InteractionState.NAVIGATION_MODE) { currentHeading?.let { hdg -> rotate(degrees = hdg, pivot = Offset(cx, cy)) { val arrowPath = Path().apply { moveTo(cx, cy - 12.dp.toPx()); lineTo(cx - 7.dp.toPx(), cy + 7.dp.toPx()); lineTo(cx + 7.dp.toPx(), cy + 7.dp.toPx()); close() }; drawPath(arrowPath, color = Color(0xFFE53935).copy(alpha = 0.85f)) } } }
-                selectedPoint?.let { truth -> drawLine(color = Color(0xFF1976D2).copy(alpha = 0.6f), start = Offset(paddingPx + (truth.x * scaleX).toFloat(), paddingPx + (truth.y * scaleY).toFloat()), end = Offset(cx, cy), strokeWidth = 2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)) }
+                selectedPoint?.let { truth -> drawLine(color = Color(0xFF1976D2).copy(alpha = 0.6f), start = Offset(originX + (truth.x * scaleX).toFloat(), originY + (truth.y * scaleY).toFloat()), end = Offset(cx, cy), strokeWidth = 2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)) }
             }
 
             targetPoint?.let { pos ->
-                val cx = paddingPx + (pos.x * scaleX).toFloat(); val cy = paddingPx + (pos.y * scaleY).toFloat()
+                val cx = originX + (pos.x * scaleX).toFloat(); val cy = originY + (pos.y * scaleY).toFloat()
                 drawCircle(color = themePrimaryColor.copy(alpha = pulseAlpha), radius = pulseRadius.dp.toPx(), center = Offset(cx, cy)); drawCircle(color = themePrimaryColor, radius = 8.dp.toPx(), center = Offset(cx, cy)); drawCircle(color = Color.White, radius = 4.dp.toPx(), center = Offset(cx, cy))
             }
         }
